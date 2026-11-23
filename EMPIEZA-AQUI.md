@@ -7,6 +7,10 @@ Supabase → tu proyecto → **SQL Editor → New query** → pega TODO el conte
 `supabase/setup_completo.sql` → **Run**.
 (Se puede ejecutar varias veces sin problema, aunque ya hayas corrido los otros.)
 
+Si tu base **ya existía antes del Modo Transformar / Crear con IA**, ejecuta también
+`supabase/0018_ia.sql` (incluye lo de `0017_transform.sql`) para agregar `transform` y
+`text_to_video` a `sources.kind` y `jobs.type`.
+
 ## 2) Vercel (1 minuto)
 Vercel → tu proyecto → **Settings → Environment Variables** → agrega:
 - Key: `APP_PASSWORD`  · Value: la contraseña que quieras  · Production marcado

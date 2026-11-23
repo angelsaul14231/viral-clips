@@ -84,8 +84,13 @@ assert np.abs(a - b).mean() > 10, "la cámara no se movió"
 print("OK: render 4K -> 1080x1920 con paneo (", round(out.stat().st_size / 1e6, 1), "MB )")
 framing.camera_keys = orig
 
-# tope de tamaño: clip de 81 s no pasa de ~44 MB
-assert render._bitrate(81) * 81 / 8 < 46e6 and render._bitrate(20) == 12_000_000
+# tope de tamaño: nunca más de CLIP_MAX_MB (44 por defecto; Supabase rechaza 50 MB), tope de calidad 10 Mbps y piso 1.2 Mbps
+assert render._bitrate(20) == 10_000_000                      # clip corto: tope de calidad
+for d in (8, 15, 30, 45, 60, 90, 120, 180, 300):
+    size = (render._bitrate(d) + 192_000) * d / 8              # video + audio
+    assert render._bitrate(d) == 1_200_000 or size <= config.CLIP_MAX_MB * 1e6 * 1.001, (d, size)
+assert render._bitrate(60) > render._bitrate(120) > render._bitrate(300)   # más largo = menos bitrate
+assert render._bitrate(3600) == 1_200_000                     # clip larguísimo: piso de calidad
 print("OK: bitrate dinámico")
 
 # ---------------- detección real de caras (astronauta de scikit-image) ----------------
@@ -145,10 +150,9 @@ for nombre, lado in (("izq.mp4", "izq"), ("der.mp4", "der")):
                           "-pix_fmt", "gray", "-"], capture_output=True).stdout
     g = np.frombuffer(raw, np.uint8).reshape(1920, 1080)
     import framing as F
-    F._load()
     small = g[::2, ::2]
-    det = F._load().detect_multi_scale(small, scale_factor=1.2, step_ratio=1, min_size=(60, 60), max_size=(500, 500))
+    det = F._detect(small)          # mismo detector que usa el worker (OpenCV; scikit-image si no está)
     assert det, f"no se ve la cara completa en el clip final ({lado})"
-    cx = (det[0]["c"] + det[0]["width"] / 2) / small.shape[1]
+    cx = det[0]["x"]
     assert 0.2 < cx < 0.8, (lado, cx)
 print("OK: la cara sale completa y centrada en el clip final")

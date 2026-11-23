@@ -1,7 +1,7 @@
 FROM python:3.11-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core ca-certificates \
+ && apt-get install -y --no-install-recommends ffmpeg espeak-ng fonts-dejavu-core fonts-montserrat ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # yt-dlp necesita un runtime de JavaScript (Deno) para resolver YouTube
@@ -20,4 +20,10 @@ RUN echo "actualizando yt-dlp ($YTDLP_BUST)" \
 
 COPY . .
 
-CMD ["python", "-u", "main.py"]
+# El arranque corre con saltos de línea de Linux aunque el archivo venga de Windows
+RUN sed -i 's/\r$//' docker-entrypoint.sh && chmod +x docker-entrypoint.sh
+
+# Docker marca el contenedor como "unhealthy" si el worker deja de dar señales de vida (healthcheck.py)
+HEALTHCHECK --interval=60s --timeout=10s --start-period=180s --retries=3 CMD ["python", "healthcheck.py"]
+
+ENTRYPOINT ["./docker-entrypoint.sh"]

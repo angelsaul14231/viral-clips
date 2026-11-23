@@ -75,12 +75,23 @@ def download(url: str, workdir: Path, quality: str, range_from, range_to):
         except DownloadError as e:
             last_err = e
             msg = str(e)
+            if "cookies are no longer valid" in msg or "cookies are invalid" in msg.lower():
+                print(f"  yt-dlp: las cookies de YouTube expiraron. Actualiza worker/cookies.txt y COOKIES_FILE en .env.", flush=True)
+                print(f"  Tip: exporta cookies frescas desde tu navegador con la extensión 'Get cookies.txt LOCALLY'.", flush=True)
+                # No reintentar: el problema es las cookies, no el formato
+                raise
             if "format is not available" in msg or "Requested format" in msg or "HTTP Error 403" in msg:
                 print(f"  yt-dlp: {msg[:90]}… pruebo otra forma de pedirlo.", flush=True)
                 continue
             raise   # otro tipo de error (bot, privado, borrado…): se muestra tal cual
 
-    raise RuntimeError(
-        "YouTube no entregó ningún formato descargable. Reconstruye el worker (cierra y abre INICIAR-WORKER.bat) "
-        "para actualizar yt-dlp, y si sigue igual prueba con cookies.txt (COOKIES_FILE). Detalle: " + str(last_err)[:250]
-    )
+    url_low = str(url).lower()
+    if "instagram.com" in url_low:
+        hint = ("Instagram requiere login: pon tus cookies en worker/cookies.txt y configura COOKIES_FILE en .env. "
+                "O usa un video público de YouTube/Twitch.")
+    elif "twitch.tv" in url_low:
+        hint = ("Twitch puede requerir cookies para VODs. Configura COOKIES_FILE en .env si falla.")
+    else:
+        hint = ("Reconstruye el worker (cierra y abre INICIAR-WORKER.bat) para actualizar yt-dlp, "
+                "y si sigue igual prueba con cookies.txt (COOKIES_FILE).")
+    raise RuntimeError(f"No se pudo descargar el video. {hint} Detalle: " + str(last_err)[:250])

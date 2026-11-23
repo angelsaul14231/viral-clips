@@ -18,5 +18,11 @@ Convierte podcasts y videos en clips verticales virales con subtítulos.
 - Parte 1 – interfaz y esquema: listo.
 - Parte 2 – worker VOD: listo.
 - Parte 3 – web conectada a datos reales + contraseña: listo.
-- Parte 4 – modo En vivo (grabación + chat): pendiente.
-- Parte 5 – "Pasar a narrado" y "Crear resumen": pendiente.
+- Parte 4 – modo En vivo (grabación + chat): listo.
+- Parte 5 – "Pasar a narrado" y "Crear resumen": listo.
+- Modo Transformar (Anti-Penalización): listo. Ver `TRANSFORMAR-CLIP.md`.
+- Crear con IA (`/crear-ia`): listo. Ver `CREAR-CON-IA.md`.
+
+Si vienes de una instalación antigua, ejecuta `supabase/0017_transform.sql` y
+`supabase/0018_ia.sql` una vez cada uno (o solo `0018`, que también cubre lo anterior).
+

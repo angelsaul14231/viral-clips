@@ -30,13 +30,45 @@ def run():
         except Exception:  # noqa: BLE001
             fatal.append("Falta la migración 0003_live.sql: pégala en Supabase > SQL Editor y ejecútala.")
 
-    if config.GROQ_API_KEY and not config.GROQ_API_KEY.startswith("gsk_"):
-        warn.append("Tu GROQ_API_KEY no empieza con 'gsk_': probablemente no es una llave de Groq.")
+    try:
+        db.sb.table("live_commands").select("id").limit(1).execute()
+        db.sb.table("watch_channels").select("id").limit(1).execute()
+    except Exception:  # noqa: BLE001
+        warn.append("Faltan las tablas de la Parte 2 (botón 'Clip ahora' y canales automáticos): "
+                    "pega supabase/migrations/0006_envivo.sql en Supabase > SQL Editor. Lo demás funciona igual.")
+
+    if config.LIVE_CHAT:
+        try:
+            import chat_downloader  # noqa: F401
+        except ImportError:
+            warn.append("Falta chat-downloader: el chat en vivo no se leerá. Reconstruye el worker (INICIAR-WORKER.bat).")
+
+    # Verificar cookies de YouTube si están configuradas
+    if config.COOKIES_FILE:
+        from pathlib import Path
+        cp = Path(config.COOKIES_FILE)
+        if not cp.exists():
+            warn.append(f"El archivo de cookies no existe: {config.COOKIES_FILE}. El worker no podrá descargar videos privados o con restricción de edad.")
+        else:
+            print(f"✓ Archivo de cookies encontrado: {config.COOKIES_FILE}", flush=True)
+
+    gkeys = config.groq_keys()
+    bad = [k for k in gkeys if not k.startswith("gsk_")]
+    if bad:
+        warn.append(f"{len(bad)} de tus {len(gkeys)} llaves de Groq no empiezan con 'gsk_' (terminan en "
+                    + ", ".join("…" + k[-4:] for k in bad[:5]) + "): probablemente no son de Groq.")
+    if gkeys:
+        print(f"Groq: {len(gkeys)} cuenta(s) configurada(s).", flush=True)
 
     if config.CLIP_LAYOUT == "crop" and config.CLIP_FRAMING == "auto":
         try:
+            import ast
+            ast.parse(open("/app/framing.py" if __import__("os").path.exists("/app/framing.py") else "framing.py").read())
             import framing
             framing._load()
+        except SyntaxError as e:
+            warn.append(f"El encuadre automatico no esta disponible (error de sintaxis en framing.py, linea {e.lineno}): "
+                        "reconstruye el worker (docker build --no-cache) para instalar la version correcta.")
         except Exception as e:  # noqa: BLE001
             warn.append(f"El encuadre automatico no esta disponible ({type(e).__name__}); los clips saldran centrados. "
                         "Reconstruye el worker (docker build) para instalar scikit-image.")
@@ -45,7 +77,7 @@ def run():
 
     names = llm.configured()
     if not names:
-        fatal.append("No hay ninguna llave de IA en worker/.env. Pon al menos una: GROQ_API_KEY (console.groq.com), "
+        fatal.append("No hay ninguna llave de IA en worker/.env. Pon al menos una: GROQ_KEYS (console.groq.com), "
                      "CEREBRAS_API_KEY, GEMINI_API_KEY, MISTRAL_API_KEY, OPENROUTER_API_KEY o GITHUB_MODELS_TOKEN.")
     else:
         print("Probando las llaves de IA (una petición mínima a cada una)…", flush=True)
