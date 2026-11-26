@@ -16,6 +16,7 @@ import uuid
 import brand
 import config
 import db
+import hook as hooks
 import detect
 import energy
 import voices
@@ -23,7 +24,7 @@ import profiles
 import snap
 from analyze import review_window, title_for
 from livechat import LiveChat
-from render import render_clip
+from render import render_clip, sync_words_for_clip
 from transcribe import transcribe
 
 NOT_LIVE_RECHECK = 10   # segundos entre las dos comprobaciones de "¿ya terminó el directo?"
@@ -56,10 +57,14 @@ def _resolve(url, quality):
     """Pide a yt-dlp el stream del directo. Devuelve (entradas, mapas_ffmpeg, título). Lanza NotLive si ya terminó."""
     import yt_dlp
 
+    # Grabar en 720p y recortar a 9:16 dejaba la cámara borrosa: piso de 1080p (es -c copy, no cuesta CPU).
+    floor = int(getattr(config, "LIVE_MIN_HEIGHT", 1080) or 1080)
     digits = "".join(ch for ch in str(quality) if ch.isdigit())   # "2160p" -> 2160 (4K)
-    height = int(digits) if digits else 720
+    best = str(quality).strip().lower() in ("best", "max", "source", "original")
+    height = max(floor, int(digits) if digits else floor)
+    fmt = "bv*+ba/b/b" if best else f"bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b/b"
     opts = {"quiet": True, "noplaylist": True,
-            "format": f"bv*[height<={height}]+ba/b[height<={height}]/bv*+ba/b/b",
+            "format": fmt,
             "remote_components": ["ejs:github"]}
     if config.COOKIES_FILE:
         opts["cookiefile"] = config.COOKIES_FILE
@@ -76,6 +81,9 @@ def _resolve(url, quality):
     fmts = [f for f in (info.get("requested_formats") or [info]) if f.get("url")]
     if not fmts:
         raise RuntimeError("No pude obtener el stream del directo")
+    got_h = next((f.get("height") for f in fmts if _has(f, "v")), None)
+    if got_h:
+        print(f"  stream: directo capturado a {got_h}p", flush=True)
     inputs = [(f["url"], f.get("http_headers") or info.get("http_headers") or {}) for f in fmts]
 
     if len(fmts) >= 2:
@@ -100,8 +108,11 @@ def _start_ffmpeg(inputs, maps, seg_dir, logf, session=1):
             if headers:
                 cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
         cmd += ["-i", stream]
+    # -muxdelay/-muxpreload a 0 evita que cada .ts arranque con ~1.4 s de relleno de timestamps.
+    # Ese relleno se acumulaba en st["offset"] y terminaba desfasando la transcripción del directo.
     cmd += maps + ["-c", "copy", "-f", "segment", "-segment_time", str(config.SEGMENT_SECONDS),
-                   "-segment_format", "mpegts", "-reset_timestamps", "1", str(seg_dir / f"s{session:02d}_seg_%05d.ts")]
+                   "-segment_format", "mpegts", "-reset_timestamps", "1", "-muxdelay", "0", "-muxpreload", "0",
+                   str(seg_dir / f"s{session:02d}_seg_%05d.ts")]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=logf)
 
 
@@ -297,14 +308,19 @@ def process_live(job):
                      for w in all_words if w["end"] >= base and w["start"] <= wend]
 
         out = work / f"{cid}.mp4"
+        try:   # que el texto de arriba enganche también en los clips del directo
+            live_hook = hooks.best_hook(m.get("hook"), m["title"], rel_words, mstart - base, end - base)
+        except Exception:  # noqa: BLE001
+            live_hook = m.get("hook") or m["title"]
         render_clip(win, rel_words, mstart - base, end - base, out, work,
                     custom_crop=src.get("custom_crop"), layout=src.get("layout"), brand=st.get("brand"),
-                    hook=m.get("hook") or m["title"], profile=prof, opts=opts)
+                    hook=live_hook, profile=prof, opts=opts)
         path = f"{sid}/{cid}.mp4"
         db.upload_clip(path, out)
         m["abs_start"], m["abs_end"] = mstart, end
-        in_clip = [{"w": w["w"], "start": w["start"] - mstart, "end": w["end"] - mstart}
-                   for w in all_words if mstart <= w["start"] <= end]
+        # La misma ventana que se quemó en el video: incluye la palabra que venía
+        # de antes del corte (SMART_START) y deja los tiempos dentro del clip.
+        in_clip = sync_words_for_clip(all_words, mstart, end)
         db.save_clip(sid, src.get("user_id"), m, path, out.stat().st_size, in_clip)
 
         for p in (lst, win_ts, win, out):   # borramos todos los temporales

@@ -143,14 +143,35 @@ def _normalize_transform(video, work, opts):
     if dur and dur > length + 1:
         print(f"  Transformar: video de {int(dur)} s → uso {int(length)} s para no saturar el worker", flush=True)
 
-    vf = (f"scale={original.W}:{original.H}:force_original_aspect_ratio=increase:flags=lanczos,"
-          f"crop={original.W}:{original.H},setsar=1,fps={original.FPS}")
-    cap = original.size_cap(length)   # tope para que el MP4 final nunca pase de CLIP_MAX_MB
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{ss:.2f}", "-t", f"{length:.2f}", "-i", str(video)]
-
     logo_cfg = brand.load(work, template=opts.get("brand_template"))
     logo = Path(logo_cfg["path"]) if logo_cfg.get("path") else None
     has_logo = bool(logo and logo.exists())
+
+    vf = (f"scale={original.W}:{original.H}:force_original_aspect_ratio=increase:flags=lanczos,"
+          f"crop={original.W}:{original.H},setsar=1,fps={original.FPS}")
+    # Marca de agua (texto) si está configurada
+    wm_text = ""
+    wm_pos = "br"
+    wm_size = 18
+    wm_opacity = 0.6
+    if isinstance(logo_cfg, dict) and isinstance(logo_cfg.get("watermark"), dict) and logo_cfg["watermark"].get("text"):
+        wm = logo_cfg["watermark"]
+        wm_text = str(wm["text"])
+        wm_pos = wm.get("pos", "br")
+        wm_size = int(wm.get("size", 18))
+        wm_opacity = float(wm.get("opacity", 0.6))
+    elif config.WATERMARK_TEXT:
+        wm_text = config.WATERMARK_TEXT
+        wm_pos = config.WATERMARK_POS
+        wm_size = config.WATERMARK_SIZE
+        wm_opacity = config.WATERMARK_OPACITY
+    if wm_text:
+        wm_escaped = wm_text.replace(":", "\\:").replace("'", "\\'")
+        pos_map = {"tl": "x=20:y=20", "tr": "x=w-tw-20:y=20", "bl": "x=20:y=h-th-20", "br": "x=w-tw-20:y=h-th-20", "center": "x=(w-tw)/2:y=(h-th)/2"}
+        pos = pos_map.get(wm_pos, pos_map["br"])
+        vf += f",drawtext=text='{wm_escaped}':fontsize={wm_size}:fontcolor=white@{wm_opacity:.2f}:borderw=2:bordercolor=black@{wm_opacity:.2f}:{pos}:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    cap = original.size_cap(length)   # tope para que el MP4 final nunca pase de CLIP_MAX_MB
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{ss:.2f}", "-t", f"{length:.2f}", "-i", str(video)]
     if has_logo:
         cmd += ["-i", str(logo)]      # render._logo_graph espera el logo en el input [1:v]
 
@@ -231,6 +252,12 @@ def process_transform(job):
         ocfg["meter"] = True
         ocfg["poll"] = True
         ex = original.extras(text, ocfg)
+        # Apertura en frío: el gancho sale arriba en el cuadro 0 (sin tarjeta previa) y la voz se oye sobre el video.
+        vdur = _probe_duration(norm)
+        ex["context"] = hooks.opening_context(ex, words, 0.0)
+        opener = hooks.best_hook(ex.get("hook") or payload.get("hook"),
+                                 payload.get("title") or src.get("title") or "", words, 0.0, vdur,
+                                 ex.get("context") or "")
 
         cid = str(uuid.uuid4())
         out = work / f"{cid}.mp4"
@@ -239,7 +266,8 @@ def process_transform(job):
         except (TypeError, ValueError):
             score = config.TRANSFORM_DEFAULT_SCORE
         try:
-            original.wrap_clip(norm, ex, out, work, ocfg, score=score)
+            original.wrap_clip(norm, ex, out, work, ocfg, score=score,
+                               hook=opener if ocfg["intro"] == "cold" else None)
         except Exception as e:  # noqa: BLE001  (si falla la envoltura, se sube el video normalizado)
             print(f"  Modo Original: no pude envolver ({type(e).__name__}: {str(e)[:140]}); subo el video normalizado.", flush=True)
             shutil.copy(norm, out)
@@ -254,6 +282,8 @@ def process_transform(job):
         m = {**base, "description": original.description(base, ex, ocfg)}
         path = f"{sid}/{cid}.mp4"
         db.upload_clip(path, out)
+        sync = config.SUB_SYNC_OFFSET
+        words = [{**w, "start": w["start"] + sync, "end": w["end"] + sync} for w in words]
         db.save_clip(sid, src.get("user_id"), m, path, out.stat().st_size, words)
         db.set_source(sid, status="done", title=base["title"])
         db.finish_job(job["id"], ok=True)
@@ -349,15 +379,16 @@ def process(job):
             cid = str(uuid.uuid4())
             out = work / f"{cid}.mp4"
 
-            if config.SMART_START and ocfg.get("smart_start", True):
-                try:   # que el clip entre en la primera frase fuerte y que el texto de arriba diga algo concreto (la gente decide en 2 s)
-                    new_start, note = hooks.refine_start(words, m["start"], m["end"])
+            try:   # el gancho de arriba SIEMPRE se afila; mover el inicio depende de SMART_START
+                if config.SMART_START and ocfg.get("smart_start", True):
+                    new_start, note = hooks.refine_start(words, m["start"], m["end"],
+                                                         max_shift=config.HOOK_MAX_SHIFT, min_gain=config.HOOK_MIN_GAIN)
                     if note:
                         print(f"  Gancho: {note}", flush=True)
                         m["start"] = new_start
-                    m["hook"] = hooks.best_hook(m.get("hook"), m["title"], words, m["start"], m["end"])
-                except Exception as e:  # noqa: BLE001  (es un extra: si falla, el clip sale como lo eligió la IA)
-                    print(f"  Gancho: no pude mejorarlo ({type(e).__name__}: {str(e)[:100]})", flush=True)
+                m["hook"] = hooks.best_hook(m.get("hook"), m["title"], words, m["start"], m["end"])
+            except Exception as e:  # noqa: BLE001  (es un extra: si falla, el clip sale como lo eligió la IA)
+                print(f"  Gancho: no pude mejorarlo ({type(e).__name__}: {str(e)[:100]})", flush=True)
             render_clip(video, words, m["start"], m["end"], out, work, custom_crop=custom_crop, layout=clip_layout, brand=logo,
                         hook=m.get("hook") or m["title"], profile=prof, opts=opts)
 
@@ -407,7 +438,8 @@ def process(job):
             path = f"{sid}/{cid}.mp4"
             db.upload_clip(path, out)
             m["abs_start"], m["abs_end"] = m["start"] + offset, m["end"] + offset
-            in_clip = [{"w": w["w"], "start": w["start"] - m["start"], "end": w["end"] - m["start"]}
+            sync = config.SUB_SYNC_OFFSET
+            in_clip = [{"w": w["w"], "start": w["start"] - m["start"] + sync, "end": w["end"] - m["start"] + sync}
                        for w in words if m["start"] <= w["start"] <= m["end"]]
             db.save_clip(sid, src.get("user_id"), m, path, out.stat().st_size, in_clip)
             gate_ok = ((not config.VIRAL) or (m.get("viral") or {}).get("verdict") == "ready") and not db.require_approval()   # solo lo que pasó el área viral (y con tu aprobación si la pediste)
@@ -461,6 +493,9 @@ def handle(job):
             process_transform(job)
         elif job["type"] == "text_to_video":
             ai_video.process_text_to_video(job)
+        elif job["type"] == "search":
+            import search
+            search.process(job)
         elif job["type"] == "clip":
             if (job.get("payload") or {}).get("preview"):
                 import preview
@@ -491,6 +526,7 @@ def main():
             print(f"Recuperación al arrancar: no pude ({type(e).__name__}: {str(e)[:100]})", flush=True)
     poster.start_thread()   # publica a su hora aunque el worker esté grabando un directo
     studio.start_thread()   # atiende Hacerlo viral (miniaturas, re-análisis) sin esperar a que termine un render
+    lifecycle.start_web_heartbeat(db)   # la web sigue viendo "worker activo" durante renders largos
     last_clean = 0.0
     while True:
         try:

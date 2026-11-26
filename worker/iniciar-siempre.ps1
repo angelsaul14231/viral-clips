@@ -2,12 +2,12 @@
 Set-Location $PSScriptRoot
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
-    Write-Host "Docker no esta instalado o no esta abierto. Instala Docker Desktop (docker.com/products/docker-desktop), abrelo y vuelve a ejecutar." -ForegroundColor Red
+    Write-Host "Docker no esta instalado o no está en el PATH. Instala Docker Desktop o Docker Toolbox y vuelve a ejecutar." -ForegroundColor Red
     exit 1
 }
 docker info *> $null
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Docker Desktop esta instalado pero no esta corriendo. Abrelo, espera a que diga 'running' y vuelve a ejecutar." -ForegroundColor Red
+    Write-Host "Docker esta instalado pero el daemon no responde. Abre Docker Desktop o corre 'docker-machine env default' (Toolbox) y vuelve a ejecutar." -ForegroundColor Red
     exit 1
 }
 if (-not (Test-Path ".env")) {
@@ -22,15 +22,17 @@ if ($old) {
     exit 1
 }
 
+# Docker Desktop trae 'docker compose' (v2); Docker Toolbox solo trae el binario 'docker-compose' (v1).
+$composeSub = if ((docker compose version *> $null) -and ($LASTEXITCODE -eq 0)) { @('compose') } else { @() }
 $env:YTDLP_BUST = Get-Date -Format "yyyyMMddHH"
 Write-Host "Construyendo y encendiendo el worker (la primera vez tarda unos minutos)..." -ForegroundColor Cyan
-docker compose up -d --build
+if ($composeSub.Count) { & docker @composeSub up -d --build } else { & docker-compose up -d --build }
 if ($LASTEXITCODE -ne 0) { Write-Host "Fallo. Mira el mensaje de arriba." -ForegroundColor Red; exit 1 }
 
 Write-Host ""
 Write-Host "Worker encendido en segundo plano y siempre activo." -ForegroundColor Green
 Write-Host "  - Puedes cerrar esta ventana. Si se cae o reinicias la PC, vuelve solo."
-Write-Host "  - IMPORTANTE: en Docker Desktop > Settings > General marca 'Start Docker Desktop when you sign in'."
+Write-Host "  - IMPORTANTE: deja el daemon de Docker (Desktop o VM de Toolbox) corriendo al iniciar Windows."
 Write-Host "  - Ver que hace: VER-LOGS.bat   |   Apagarlo: DETENER-WORKER.bat"
 Start-Sleep -Seconds 8
-docker compose ps
+if ($composeSub.Count) { & docker @composeSub ps } else { & docker-compose ps }

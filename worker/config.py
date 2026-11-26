@@ -62,10 +62,21 @@ CLIP_FRAMING = (os.environ.get("CLIP_FRAMING") or "auto").strip().lower()
 # Calidad: CRF más bajo = más nítido y más pesado (17-20 va bien); nitidez 0 = apagada, 0.5 suave, 1.0 fuerte
 CLIP_CRF = int(os.environ.get("CLIP_CRF") or 16)
 CLIP_PRESET = (os.environ.get("CLIP_PRESET") or "medium").strip()   # ultrafast ... veryfast, fast, medium, slow
+# 60 fps a 1080x1920 reparte el presupuesto de bits entre el doble de cuadros y se ve peor.
+# El contenido de directos/realities se ve igual a 30 fps y cada cuadro recibe el doble de bits.
 try:
-    CLIP_SHARPEN = min(1.5, max(0.0, float(os.environ.get("CLIP_SHARPEN") or 0.6)))
+    CLIP_OUTPUT_FPS = min(60, max(24, int(float(os.environ.get("CLIP_OUTPUT_FPS") or 30))))
 except ValueError:
-    CLIP_SHARPEN = 0.6
+    CLIP_OUTPUT_FPS = 30
+try:
+    # El recorte 9:16 de un directo 1080p se estira ~1.8x: CAS recupera detalle sin el halo del unsharp agresivo.
+    CLIP_CAS = min(1.0, max(0.0, float(os.environ.get("CLIP_CAS") or 0.65)))
+except ValueError:
+    CLIP_CAS = 0.65
+try:
+    CLIP_SHARPEN = min(1.5, max(0.0, float(os.environ.get("CLIP_SHARPEN") or 0.35)))
+except ValueError:
+    CLIP_SHARPEN = 0.35
 # Encuadre horizontal del recorte: 0 = izquierda, 0.5 = centro, 1 = derecha (útil si la persona no está en el centro)
 try:
     CLIP_FOCUS_X = min(1.0, max(0.0, float(os.environ.get("CLIP_FOCUS_X") or 0.5)))
@@ -96,6 +107,13 @@ try:
     CLIP_HOOK_SIZE = min(100, max(40, int(os.environ.get("CLIP_HOOK_SIZE") or 72)))      # tamaño del gancho arriba del clip
 except ValueError:
     CLIP_HOOK_SIZE = 72
+# Sincronía voz/subtítulos: Whisper y Groq marcan la palabra ~0.35-0.5 s DESPUÉS de que empieza a oírse
+# (por eso "el audio va adelantado": se oye primero y el texto sale después). Negativo = el texto entra antes.
+# Se puede afinar en .env con SUB_SYNC_OFFSET (0 desactiva el ajuste).
+try:
+    SUB_SYNC_OFFSET = min(1.0, max(-1.0, float(os.environ.get("SUB_SYNC_OFFSET") or -0.35)))
+except ValueError:
+    SUB_SYNC_OFFSET = -0.35
 
 # IA (viral.py) - ajustables sin tocar código:
 try:
@@ -123,25 +141,44 @@ try:
 except ValueError:
     CLIP_MIN_DWELL = 3
 try:
-    CLIP_MIN_GAP = min(5.0, max(0.5, float(os.environ.get("CLIP_MIN_GAP") or 1.5)))       # segundos mínimos entre paneos
+    CLIP_MIN_GAP = min(5.0, max(0.5, float(os.environ.get("CLIP_MIN_GAP") or 3.0)))       # segundos mínimos entre paneos
 except ValueError:
-    CLIP_MIN_GAP = 1.5
+    CLIP_MIN_GAP = 3.0
 try:
     CLIP_URGENT_EDGE = min(0.6, max(0.1, float(os.environ.get("CLIP_URGENT_EDGE") or 0.36)))  # si la cara cae en el exterior, reacciona rápido
 except ValueError:
     CLIP_URGENT_EDGE = 0.36
 try:
-    CLIP_RAMP = min(2.0, max(0.2, float(os.environ.get("CLIP_RAMP") or 0.5)))             # duración del paneo
+    CLIP_RAMP = min(2.0, max(0.2, float(os.environ.get("CLIP_RAMP") or 0.55)))            # duración del paneo
 except ValueError:
-    CLIP_RAMP = 0.5
+    CLIP_RAMP = 0.55
 try:
-    CLIP_MIN_COVERAGE = min(0.5, max(0.05, float(os.environ.get("CLIP_MIN_COVERAGE") or 0.2)))  # si hay caras en menos de esta fracción, usa el centro
+    CLIP_MIN_COVERAGE = min(0.5, max(0.05, float(os.environ.get("CLIP_MIN_COVERAGE") or 0.25)))  # si hay caras en menos de esta fracción, usa el centro
 except ValueError:
-    CLIP_MIN_COVERAGE = 0.2
+    CLIP_MIN_COVERAGE = 0.25
+# --- Cámara del en vivo: análisis más fino sin frenar la grabación ---
+try:
+    CLIP_CAM_DET_W = min(1280, max(640, int(os.environ.get("CLIP_CAM_DET_W") or 960)))
+except ValueError:
+    CLIP_CAM_DET_W = 960
+try:
+    CLIP_CAM_FPS = min(6.0, max(2.0, float(os.environ.get("CLIP_CAM_FPS") or 3.5)))
+except ValueError:
+    CLIP_CAM_FPS = 3.5
+try:
+    CLIP_CAM_FACE_MIN = min(0.08, max(0.015, float(os.environ.get("CLIP_CAM_FACE_MIN") or 0.035)))
+except ValueError:
+    CLIP_CAM_FACE_MIN = 0.035
 COOKIES_FILE = os.environ.get("COOKIES_FILE", "")  # cookies.txt de YouTube si te pide "confirmar que no eres un bot"
 
 # --- NUEVO: Ruta del logo para el Brand Kit ---
 LOGO_PATH = os.environ.get("LOGO_PATH", "")
+
+# --- Marca de agua (texto) ---
+WATERMARK_TEXT = os.environ.get("WATERMARK_TEXT", "").strip()
+WATERMARK_POS = (os.environ.get("WATERMARK_POS") or "br").strip().lower()  # tl, tr, bl, br, center
+WATERMARK_SIZE = max(12, min(60, int(os.environ.get("WATERMARK_SIZE") or 18)))
+WATERMARK_OPACITY = min(1.0, max(0.1, float(os.environ.get("WATERMARK_OPACITY") or 0.6)))
 
 POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "5"))
 # Absoluta: varios subprocess de ffmpeg corren con cwd=work; si fuera relativa,
@@ -150,6 +187,8 @@ WORK_DIR = Path(os.environ.get("WORK_DIR", "./work")).resolve()
 
 # --- Modo En vivo ---
 SEGMENT_SECONDS = int(os.environ.get("SEGMENT_SECONDS", "45"))    # tamaño de cada trozo grabado (más corto = clips más rápido)
+# Grabar el directo a 720p y estirar el recorte 9:16 a 1080 dejaba la cámara borrosa. Piso mínimo de captura:
+LIVE_MIN_HEIGHT = int(os.environ.get("LIVE_MIN_HEIGHT") or 1080)
 REVIEW_MINUTES = int(os.environ.get("REVIEW_MINUTES", "2"))       # cada cuánto revisa la IA (si la web no lo manda)
 LIVE_MIN_SCORE = int(os.environ.get("LIVE_MIN_SCORE", "55"))      # puntaje mínimo para crear un clip en vivo
 
@@ -255,10 +294,11 @@ try:
 except ValueError:
     TRANSFORM_DEFAULT_SCORE = 78
 TRANSFORM_ALWAYS_ORIGINAL = (os.environ.get("TRANSFORM_ALWAYS_ORIGINAL") or "1").strip().lower() not in ("0", "false", "no", "off")
-# En transformar conviene una tarjeta narrada ANTES del video: así la voz propia se oye desde el primer segundo.
-TRANSFORM_INTRO = (os.environ.get("TRANSFORM_INTRO") or "card").strip().lower()
+# Transformar arranca en frío: video + gancho en el cuadro 0, voz propia mezclada SOBRE el video.
+# La tarjeta anterior ("card") regalaba 2 s en los que la gente se iba; queda solo como opción manual.
+TRANSFORM_INTRO = (os.environ.get("TRANSFORM_INTRO") or "cold").strip().lower()
 if TRANSFORM_INTRO not in ("cold", "card"):
-    TRANSFORM_INTRO = "card"
+    TRANSFORM_INTRO = "cold"
 # --- Crear con IA (texto -> video, 60 s vertical) ---
 HF_TOKEN = (os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_API_KEY") or "").strip()
 HF_MODEL = os.environ.get("HF_MODEL") or "damo-vilab/text-to-video-ms-1.7b"
@@ -358,6 +398,18 @@ DISCOVER_MINUTES = int(os.environ.get("DISCOVER_MINUTES") or 30)          # cada
 DISCOVER_MAX_PER_DAY = int(os.environ.get("DISCOVER_MAX_PER_DAY") or 8)   # videos nuevos que puede procesar en 24 h (cuida tu cupo de IA)
 DISCOVER_MAX_QUEUED = int(os.environ.get("DISCOVER_MAX_QUEUED") or 2)     # no encola más si ya hay tantos videos esperando
 DISCOVER_INSPECT = int(os.environ.get("DISCOVER_INSPECT") or 6)           # máximo de videos que mira a fondo por revisión
+
+
+# --- Buscador de clips virales (TikTok / Instagram Reels) ---
+# TikTok se lee con yt-dlp desde perfiles públicos (tiktok:user) y links directos.
+# Instagram necesita cookies (COOKIES_FILE) para sus reels; sin ellas se omite sin tumbar la búsqueda.
+SEARCH_ACCOUNTS = int(os.environ.get("SEARCH_ACCOUNTS") or 12)              # máximo de perfiles por búsqueda
+SEARCH_INSPECT = int(os.environ.get("SEARCH_INSPECT") or 8)                 # máximo de videos que se miran a fondo (miniatura/marca)
+SEARCH_MIN_VIEWS = int(os.environ.get("SEARCH_MIN_VIEWS") or 10000)         # vistas mínimas para considerar un clip viral
+SEARCH_MAX_AGE_HOURS = int(os.environ.get("SEARCH_MAX_AGE_HOURS") or 72)    # no buscar videos muy viejos
+SEARCH_MIN_ENGAGEMENT = float(os.environ.get("SEARCH_MIN_ENGAGEMENT") or 1.5)  # likes / vistas en %
+SEARCH_BRAND_FILTER = (os.environ.get("SEARCH_BRAND_FILTER") or "1").strip().lower() in ("1", "true", "yes", "on")
+SEARCH_SEEDS = [s.strip() for s in (os.environ.get("SEARCH_SEEDS") or "").split(",") if s.strip()]  # perfiles por defecto
 
 
 # --- Parte 10: Mi página (estadísticas y mejores horas aprendidas) y Facebook como fuente ---

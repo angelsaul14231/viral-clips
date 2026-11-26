@@ -15,6 +15,29 @@ DUO_H = 960
 SUB_MARGIN = {"crop": 600, "blur": 600, "duo": 890}
 
 
+def sync_words_for_clip(words, start, end, sync=None):
+    """Palabras que se OYEN en [start,end), con tiempos ya relativos al clip y acotados.
+
+    Con SMART_START el directo puede arrancar a mitad de frase: incluir la palabra
+    que empezó justo antes del corte evita que el primer segundo salga sin subtítulo.
+    El desfase de Whisper (SUB_SYNC_OFFSET) se aplica aquí una sola vez.
+    """
+    sync = config.SUB_SYNC_OFFSET if sync is None else sync
+    dur = max(0.0, end - start)
+    out = []
+    for w in words or []:
+        if w.get("end", 0) <= start or w.get("start", 0) >= end:
+            continue
+        a = max(0.0, min(dur, w["start"] - start + sync))
+        b = max(0.0, min(dur, w["end"] - start + sync))
+        if b <= a:
+            b = min(dur, a + 0.08)
+        if b <= a:
+            continue
+        out.append({**w, "start": a, "end": b})
+    return out
+
+
 def _hex(c: str, default: str = "FFFFFF") -> str:
     c = str(c or "").lstrip("#")
     if not re.fullmatch(r"[0-9a-fA-F]{6}", c):
@@ -42,7 +65,7 @@ WrapStyle: 0
 [V4+ Styles]
 Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
 Style: Cap,Montserrat,{st['size']},&H00{_hex(st['text'])},&H00{_hex(st['text'])},&H00{_hex(st['outline'], '000000')},&H96000000,-1,0,0,0,100,100,0,0,1,{st['outline_w']},6,2,120,120,{margin},1
-Style: Hook,DejaVu Sans,{config.CLIP_HOOK_SIZE},&H00000000,&H00000000,&H00FFFFFF,&H00FFFFFF,-1,0,0,0,100,100,0,0,3,18,0,8,90,90,290,1
+Style: Hook,DejaVu Sans,{config.CLIP_HOOK_SIZE},&H0000E0FF,&H0000E0FF,&H00000000,&HC8000000,-1,0,0,0,100,100,0,0,3,10,0,8,80,80,270,1
 
 [Events]
 Format: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
@@ -91,7 +114,8 @@ def _lines(ws, max_words):
 def build_ass(words, start, end, group=3, layout="crop", style=None, hook=None, hook_sec=3.5, tmap=None, n_speakers=0):
     tmap = tmap or (lambda t: t)
     st = _subs(style)
-    ws = [w for w in words if w["start"] >= start - 0.05 and w["end"] <= end + 0.3]
+    # Solapar, no recortar por el inicio: con SMART_START la frase puede venir de antes del corte.
+    ws = [w for w in words if w["start"] < end and w["end"] > start]
     lines = [_header(layout, st)]
 
     white = "{\\c&H" + _hex(st["text"]) + "&}"
@@ -110,14 +134,15 @@ def build_ass(words, start, end, group=3, layout="crop", style=None, hook=None, 
         h = _esc(str(hook).strip()[:70], True)
         lines.append(f"Dialogue: 1,{_t(0.0)},{_t(max(1.0, min(hook_sec, end - start - 0.2)))},Hook,,0,0,0,,{HOOK_POP}{h}\n")
 
+    sync = config.SUB_SYNC_OFFSET
+    limit = max(0.1, tmap(max(0.0, end - start)))
     for g in _lines(ws, group):
-        for j, w in enumerate(g):
-            t0 = tmap(w["start"] - start)
-            t1 = tmap((g[j + 1]["start"] if j + 1 < len(g) else w["end"]) - start)
-            if t1 <= t0:
-                t1 = t0 + 0.1
+        g2 = sync_words_for_clip(g, start, end, sync)
+        for j, w in enumerate(g2):
+            t0 = max(0.0, min(limit, tmap(w["start"])))
+            t1 = max(t0 + 0.1, min(limit, tmap(g2[j + 1]["start"] if j + 1 < len(g2) else w["end"])))
             partes = []
-            for k, x in enumerate(g):
+            for k, x in enumerate(g2):
                 partes.append((f"{active_for(x)}{pop}" if k == j else white) + _esc(x["w"], st["upper"]))
             lines.append(f"Dialogue: 0,{_t(t0)},{_t(t1)},Cap,,0,0,0,,{' '.join(partes)}\n")
     return "".join(lines)
@@ -138,7 +163,7 @@ def _probe(path: Path):
 # --- ARREGLO DEFINITIVO: Bitrate calculado para no pasar de 35 MB en Supabase ---
 def _bitrate(dur: float) -> int:
     """Bitrate de video para que el clip pese como máximo CLIP_MAX_MB (Supabase rechaza 50 MB o más).
-    Clips cortos: tope de calidad de 10 Mbps. Clips largos: baja solo lo necesario, hasta un piso de 1.2 Mbps."""
+    Clips cortos: tope de calidad de 12 Mbps. Clips largos: baja solo lo necesario, hasta un piso de 1.5 Mbps."""
     total = config.CLIP_MAX_MB * 1_000_000 * 8 / max(dur, 1.0)
     return int(min(12_000_000, max(1_500_000, total - 192_000)))
 # --------------------------------------------------------------------------------
@@ -232,13 +257,36 @@ def _ass_for(words, start, end, workdir: Path, stem: str, layout: str, brand: di
     return ass
 
 
-def layout_graph(layout: str, source: Path, start: float, dur: float, custom_crop: dict = None, keys=None) -> str:
+def _polish() -> str:
+    """Nitidez final: CAS (pensado para recortes ampliados) + un toque de unsharp. Devuelve '' si está apagado."""
+    parts = []
+    cas = getattr(config, "CLIP_CAS", 0.0)
+    if cas > 0:
+        parts.append(f"cas=strength={cas:.2f}")
+    if config.CLIP_SHARPEN > 0:
+        parts.append(f"unsharp=5:5:{config.CLIP_SHARPEN:.2f}:5:5:0.0")
+    return ",".join(parts)
+
+
+def _finish(tail: str) -> str:
+    p = _polish()
+    return tail + ("," + p if p else "")
+
+
+def layout_graph(layout: str, source: Path, start: float, dur: float, custom_crop: dict = None, keys=None,
+                 polish: bool = True) -> str:
+    # `polish=False` lo usa _render_core: la nitidez se aplica DESPUÉS del zoom para que no se pierda.
+    fin = _finish if polish else (lambda tail: tail)
     if layout == "blur":
+        # Difuminar a resolución completa costaba ~20 min por clip de 1 min en la VM de 3 CPU.
+        # Se desdifumina a 1/4 (mismo radio aparente), se procesa ahí y se vuelve a subir: el
+        # resultado se ve igual y el render baja a segundos.
         return (
             "[0:v]split=2[bg][fg];"
-            "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=30:5,eq=brightness=-0.12[b];"
+            "[bg]scale=270:480:force_original_aspect_ratio=increase:flags=bilinear,crop=270:480,"
+            "boxblur=8:2,eq=brightness=-0.12,scale=1080:1920:flags=bicubic[b];"
             "[fg]scale=1080:-2:flags=lanczos[f];"
-            "[b][f]overlay=(W-w)/2:(H-h)/2,setsar=1"
+            "[b][f]overlay=(W-w)/2:(H-h)/2," + fin("setsar=1")
         )
     if layout == "duo":
         sw, sh = _probe(source)
@@ -248,7 +296,7 @@ def layout_graph(layout: str, source: Path, start: float, dur: float, custom_cro
             "[0:v]split=2[a][b];"
             f"[a]{a},scale=1080:{DUO_H}:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:{DUO_H},setsar=1[t];"
             f"[b]{b},scale=1080:{DUO_H}:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:{DUO_H},setsar=1[g];"
-            "[t][g]vstack=inputs=2"
+            "[t][g]vstack=inputs=2," + fin("setsar=1")
         )
     if layout in SPLIT_TOPS:
         top_h = SPLIT_TOPS[layout]
@@ -264,13 +312,12 @@ def layout_graph(layout: str, source: Path, start: float, dur: float, custom_cro
             "[0:v]split=2[a][b];"
             f"[a]{cam},scale=1080:{top_h}:force_original_aspect_ratio=increase:flags=lanczos,crop=1080:{top_h},setsar=1[t];"
             f"[b]{game},setsar=1[g];"
-            "[t][g]vstack=inputs=2"
+            "[t][g]vstack=inputs=2," + fin("setsar=1")
         )
-    sharpen = f"unsharp=5:5:{config.CLIP_SHARPEN:.2f}:5:5:0.0," if config.CLIP_SHARPEN > 0 else ""
     return (
         "[0:v]" + _crop_filter(source, start, dur, custom_crop, keys)
         + ",scale=1080:1920:flags=lanczos+accurate_rnd+full_chroma_int,"
-        + sharpen + "setsar=1"
+        + fin("setsar=1")
     )
 
 
@@ -411,7 +458,7 @@ def _render_core(source: Path, words, start: float, end: float, out: Path, workd
             n_spk = 0
     ass = _ass_for(words, start, end, workdir, out.stem, layout, brand, hook, tmap=postfx.make_tmap(slow), n_speakers=n_spk)
 
-    graph = layout_graph(layout, source, start, dur, custom_crop, keys) + "[vL]"
+    graph = layout_graph(layout, source, start, dur, custom_crop, keys, polish=False) + "[vL]"
     cur = "vL"
     if zooms:
         graph += f";[{cur}]{postfx.zoom_chain(zooms)[:-1]}[vZ]"
@@ -419,10 +466,28 @@ def _render_core(source: Path, words, start: float, end: float, out: Path, workd
     if slow:
         graph += ";" + postfx.slow_video(cur, "vS", slow)
         cur = "vS"
+    # CAS + unsharp al FINAL: si se aplican antes del zoom, el reescalado se come el filo.
+    p = _polish()
+    if p:
+        graph += f";[{cur}]{p}[vP]"
+        cur = "vP"
     graph += f";[{cur}]subtitles={ass.name}[vA]"
     cur = "vA"
+    # Marca de agua (texto) si está configurada (web tiene prioridad sobre .env)
+    wm_cfg = (brand or {}).get("watermark") if isinstance(brand, dict) else None
+    if not wm_cfg and config.WATERMARK_TEXT:
+        wm_cfg = {"text": config.WATERMARK_TEXT, "pos": config.WATERMARK_POS, "size": config.WATERMARK_SIZE, "opacity": config.WATERMARK_OPACITY}
+    if wm_cfg and wm_cfg.get("text"):
+        wm = str(wm_cfg["text"]).replace(":", "\\:").replace("'", "\\'")
+        pos_map = {"tl": "x=20:y=20", "tr": "x=w-tw-20:y=20", "bl": "x=20:y=h-th-20", "br": "x=w-tw-20:y=h-th-20", "center": "x=(w-tw)/2:y=(h-th)/2"}
+        pos = pos_map.get(wm_cfg.get("pos", "br"), pos_map["br"])
+        alpha = float(wm_cfg.get("opacity", 0.6))
+        size = int(wm_cfg.get("size", 18))
+        wm_filter = f"drawtext=text='{wm}':fontsize={size}:fontcolor=white@{alpha:.2f}:borderw=2:bordercolor=black@{alpha:.2f}:{pos}:fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+        graph += f";[{cur}]{wm_filter}[vW]"
+        cur = "vW"
     if brand and brand.get("progress_bar"):
-        graph = _bar_graph(graph, dur_out, "vA", "vB")
+        graph = _bar_graph(graph, dur_out, cur, "vB")
         cur = "vB"
     logo = Path(brand["path"]) if brand and brand.get("path") else None
     use_logo = bool(logo and logo.exists())
@@ -440,6 +505,6 @@ def _render_core(source: Path, words, start: float, end: float, out: Path, workd
 
     vb = _bitrate(dur_out)
     head = ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-t", f"{dur:.2f}"] + inputs + ["-filter_complex", graph, "-map", "[out]"] + amap
-    tail = ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out.resolve())]
+    tail = ["-r", str(config.CLIP_OUTPUT_FPS), "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out.resolve())]
     _encode(head, tail, vb, workdir)
     return out

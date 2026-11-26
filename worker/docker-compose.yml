@@ -1,4 +1,5 @@
 # Worker de ClipForge siempre activo.  Encender: INICIAR-SIEMPRE.bat   (o:  docker compose up -d --build)
+version: "3.7"   # compatible también con el docker-compose 1.x de Docker Toolbox
 services:
   worker:
     build:

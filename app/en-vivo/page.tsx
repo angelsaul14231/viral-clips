@@ -145,12 +145,12 @@ export default function EnVivo() {
           <div style={{ marginTop: 14 }}>
             <label>Formato del video</label>
             <select name="layout" defaultValue="crop">
-              <option value="crop">Zoom a la cara</option>
-              <option value="split">Dividido: cara grande</option>
-              <option value="split_eq">Dividido: equilibrado</option>
+              <option value="crop">Vertical (recomendado - sigue la cara)</option>
+              <option value="split">Dividido: cara grande arriba, juego abajo</option>
+              <option value="split_eq">Dividido: equilibrado (mitad y mitad)</option>
               <option value="split_game">Dividido: juego grande</option>
+              <option value="blur">Fondo difuminado (video completo)</option>
               <option value="duo">Dos personas (una arriba, otra abajo)</option>
-              <option value="blur">Fondo borroso</option>
             </select>
           </div>
 
