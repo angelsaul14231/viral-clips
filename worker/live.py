@@ -39,6 +39,22 @@ class NotLive(RuntimeError):
 
 
 def _duration(path) -> float:
+    # Con -isync el audio puede sobresalir del final del trozo. La línea de tiempo del directo la marca el
+    # video: usar format=duration acumularía ese cola audio en cada trozo y desfasaría transcripción y clips.
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=duration",
+         "-of", "csv=p=0", str(path)], capture_output=True, text=True,
+    )
+    vals = []
+    for line in r.stdout.splitlines():
+        v = line.strip().rstrip(",")
+        if v and v != "N/A":
+            try:
+                vals.append(float(v))
+            except ValueError:
+                pass
+    if vals:
+        return max(vals)
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
         capture_output=True, text=True,
@@ -104,11 +120,19 @@ def _resolve(url, quality):
 def _start_ffmpeg(inputs, maps, seg_dir, logf, session=1):
     """Graba en trozos 's01_seg_00000.ts', 's01_seg_00001.ts'… (el número de sesión sube con cada reconexión)."""
     cmd = ["ffmpeg", "-y", "-loglevel", "warning"]
-    for stream, headers in inputs:
+    # Video y audio separados llegan con timestamps del mismo reloj pero con starts distintos. Sin estas
+    # opciones ffmpeg separa cada entrada a cero y se come el desfase: el audio sale adelantado o atrasado.
+    # -isync 0 (audio -> video) conserva esa diferencia; copyts + start_at_zero lo hace compatible con segment.
+    two_inputs = len(inputs) >= 2
+    if two_inputs:
+        cmd += ["-copyts", "-start_at_zero"]
+    for i, (stream, headers) in enumerate(inputs):
         if stream.startswith("http"):
             cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "10", "-rw_timeout", "30000000"]
             if headers:
                 cmd += ["-headers", "".join(f"{k}: {v}\r\n" for k, v in headers.items())]
+        if two_inputs and i == 1:
+            cmd += ["-isync", "0"]
         cmd += ["-i", stream]
     # -muxdelay/-muxpreload a 0 evita que cada .ts arranque con ~1.4 s de relleno de timestamps.
     # Ese relleno se acumulaba en st["offset"] y terminaba desfasando la transcripción del directo.
@@ -116,6 +140,32 @@ def _start_ffmpeg(inputs, maps, seg_dir, logf, session=1):
                    "-segment_format", "mpegts", "-reset_timestamps", "1", "-muxdelay", "0", "-muxpreload", "0",
                    str(seg_dir / f"s{session:02d}_seg_%05d.ts")]
     return subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=logf)
+
+
+def _audio_offset(path) -> float:
+    """Segundos que el audio arranca después del video dentro de un trozo (con -isync puede no ser 0)."""
+    def first_pts(selector):
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-read_intervals", "%+#1", "-select_streams", selector,
+             "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True,
+        )
+        for line in r.stdout.splitlines():
+            v = line.strip().rstrip(",")
+            if v and v != "N/A":
+                try:
+                    return float(v)
+                except ValueError:
+                    pass
+        return None
+
+    v, a = first_pts("v:0"), first_pts("a:0")
+    if v is None or a is None:
+        return 0.0
+    d = a - v
+    if abs(d) < 0.05:   # ruido normal del muxer (AAC priming, B-frames): no merece mover los subtítulos
+        return 0.0
+    return max(-30.0, min(30.0, d))
 
 
 def _has_audio(path) -> bool:
@@ -207,6 +257,7 @@ def process_live(job):
             f.unlink(missing_ok=True)
             return
         start = st["offset"]
+        aoff = _audio_offset(f)   # el audio puede arrancar después del vídeo dentro del .ts
         try:
             if not _has_audio(f):
                 if not st.get("warned_mute"):
@@ -219,8 +270,13 @@ def process_live(job):
             segments, words = [], []
         if segments and prof.get("voices"):
             tracker.label(f, segments, words)      # antes de sumar el desfase: los tiempos aún son del trozo
-        segments = [{**s, "start": s["start"] + start, "end": s["end"] + start} for s in segments]
-        words = [{**w, "start": w["start"] + start, "end": w["end"] + start} for w in words]
+        # Whisper lee el audio desde 0; sumamos el desfase para que palabras y volumen caigan en el segundo
+        # de VIDEO correcto (si no, los subtítulos salen adelantados cuando el audio arranca más tarde).
+        segments = [{**s, "start": s["start"] + start + aoff, "end": s["end"] + start + aoff} for s in segments]
+        words = [{**w, "start": w["start"] + start + aoff, "end": w["end"] + start + aoff} for w in words]
+        # descarta audio sin video (cola y, si el audio va adelantado, cabeza)
+        segments = [s for s in segments if s["start"] < start + dur and s["end"] > start]
+        words = [w for w in words if w["start"] < start + dur and w["end"] > start]
         if segments:
             db.save_transcript(sid, segments)
         all_segments.extend(segments)
@@ -228,21 +284,22 @@ def process_live(job):
         # pistas del trozo: volumen y (si el tipo de contenido lo usa) cambios de imagen
         try:
             base = int(start)
+            abase = int(round(base + aoff))
             for i, v in enumerate(energy.audio_levels(f)):
-                lv_audio[base + i] = v
+                lv_audio[abase + i] = v
             if prof["bonus"].get("motion"):
                 for i, v in enumerate(energy.scene_levels(f)):
                     lv_scene[base + i] = v
             sig = prof.get("signals") or {}
             if sig.get("combat") and config.DETECT_AUDIO:
                 shots, booms = detect.combat_seconds(f)
-                ev_combat.update(base + t for t in (shots | booms))
+                ev_combat.update(abase + t for t in (shots | booms))
             if sig.get("screen") and config.DETECT_SCREEN:
                 for t, k in detect.screen_events(f).items():
                     ev_screen[base + t] = k
         except Exception as e:  # noqa: BLE001  (las pistas son un extra)
             print(f"  aviso: no pude calcular pistas de {f.name} ({type(e).__name__})", flush=True)
-        segs.append({"path": f, "start": start, "end": start + dur, "session": sess})
+        segs.append({"path": f, "start": start, "end": start + dur, "session": sess, "vdur": dur})
         st["offset"] = start + dur
         print(f"  trozo {f.name}: {dur:.0f}s, {len(segments)} frases", flush=True)
 
@@ -290,7 +347,14 @@ def process_live(job):
         mstart, end = t["mstart"], t["end"]
         m = t["m"]
         lst = work / f"{cid}.txt"
-        lst.write_text("".join(f"file '{s['path'].resolve()}'\n" for s in cov))
+        # La duración que concat debe usar es la del VIDEO: si el audio arranca desfasado o tiene cola,
+        # format=duration es más larga y el concat mete un hueco entre trozos (audio y subtítulos se siguen
+        # desfasando en los clips que cruzan más de un segmento).
+        lst.write_text("".join(
+            f"file '{s['path'].resolve()}'\n"
+            f"duration {float(s.get('vdur') or _duration(s['path'])):.3f}\n"
+            for s in cov
+        ))
 
         # Unimos los .ts y lo convertimos a .mp4 estándar
         win_ts = work / f"{cid}.ts"
