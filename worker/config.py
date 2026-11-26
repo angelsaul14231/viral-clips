@@ -62,6 +62,8 @@ CLIP_FRAMING = (os.environ.get("CLIP_FRAMING") or "auto").strip().lower()
 # Calidad: CRF más bajo = más nítido y más pesado (17-20 va bien); nitidez 0 = apagada, 0.5 suave, 1.0 fuerte
 CLIP_CRF = int(os.environ.get("CLIP_CRF") or 16)
 CLIP_PRESET = (os.environ.get("CLIP_PRESET") or "medium").strip()   # ultrafast ... veryfast, fast, medium, slow
+# En directos el render corre mientras se sigue grabando: usa preset rápido para no bloquear la cola.
+LIVE_CLIP_PRESET = (os.environ.get("LIVE_CLIP_PRESET") or "veryfast").strip()
 # 60 fps a 1080x1920 reparte el presupuesto de bits entre el doble de cuadros y se ve peor.
 # El contenido de directos/realities se ve igual a 30 fps y cada cuadro recibe el doble de bits.
 try:

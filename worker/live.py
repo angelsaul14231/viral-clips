@@ -7,9 +7,11 @@ Parte 2:
   - Tipo de contenido (podcast, entrevista, juego, directo), igual que en Crear clips.
   - Botón "Clip ahora": corta los últimos segundos del directo cuando la web lo pide.
 """
+import queue
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 
@@ -181,6 +183,7 @@ def process_live(job):
     logf = open(log_path, "wb")
     proc = None
     chat = None
+    render_thread = None
 
     segs = []          # trozos ya transcritos: {path,start,end,session}
     all_segments = []  # transcripción global (tiempos desde que empezó la grabación)
@@ -276,17 +279,16 @@ def process_live(job):
         return extra, labels
 
     # ------------------------------------------------------------------ clips
-    def make_clip(m):
-        """Corta el momento m (tiempos de la grabación). Devuelve el id del clip, o None si no hay video de ese tramo."""
-        cov = [s for s in segs if s["end"] > m["start"] and s["start"] < m["end"] and s["path"].exists()]
-        if cov:
-            # si el tramo cruza una reconexión, se queda solo con la última parte seguida (no se pueden pegar dos sesiones)
-            last = cov[-1]["session"]
-            cov = [s for s in cov if s["session"] == last]
-        if not cov:
-            return None
-        cid = str(uuid.uuid4())
-        base = cov[0]["start"]
+    # El render va en un hilo: mientras ffmpeg codifica un clip, el bucle sigue ingestando trozos y avisando
+    # de progreso. Antes, cada clip congelaba la grabación varios minutos en directos largos.
+    clip_queue = queue.Queue()
+    render_lock = threading.Lock()
+
+    def _save_clip(t):
+        cid = t["cid"]
+        cov, base = t["cov"], t["base"]
+        mstart, end = t["mstart"], t["end"]
+        m = t["m"]
         lst = work / f"{cid}.txt"
         lst.write_text("".join(f"file '{s['path'].resolve()}'\n" for s in cov))
 
@@ -301,34 +303,77 @@ def process_live(job):
         if r2.returncode != 0:
             raise RuntimeError("ffmpeg conversion a mp4 falló: " + r2.stderr[-400:])
 
-        wend = cov[-1]["end"]
-        mstart = max(m["start"], base)
-        end = min(m["end"], wend)
-        rel_words = [{**w, "start": w["start"] - base, "end": w["end"] - base}
-                     for w in all_words if w["end"] >= base and w["start"] <= wend]
-
         out = work / f"{cid}.mp4"
-        try:   # que el texto de arriba enganche también en los clips del directo
-            live_hook = hooks.best_hook(m.get("hook"), m["title"], rel_words, mstart - base, end - base)
-        except Exception:  # noqa: BLE001
-            live_hook = m.get("hook") or m["title"]
-        render_clip(win, rel_words, mstart - base, end - base, out, work,
-                    custom_crop=src.get("custom_crop"), layout=src.get("layout"), brand=st.get("brand"),
-                    hook=live_hook, profile=prof, opts=opts)
+        render_clip(win, t["words"], mstart - base, end - base, out, work,
+                    custom_crop=t["custom_crop"], layout=t["layout"], brand=t["brand"],
+                    hook=t["hook"], profile=t["profile"], opts=t["opts"])
         path = f"{sid}/{cid}.mp4"
         db.upload_clip(path, out)
         m["abs_start"], m["abs_end"] = mstart, end
         # La misma ventana que se quemó en el video: incluye la palabra que venía
         # de antes del corte (SMART_START) y deja los tiempos dentro del clip.
-        in_clip = sync_words_for_clip(all_words, mstart, end)
-        db.save_clip(sid, src.get("user_id"), m, path, out.stat().st_size, in_clip)
+        in_clip = sync_words_for_clip(t["all_words"], mstart, end)
+        db.save_clip(sid, t["user_id"], m, path, out.stat().st_size, in_clip)
 
         for p in (lst, win_ts, win, out):   # borramos todos los temporales
             p.unlink(missing_ok=True)
-        st["clips"] += 1
-        chosen_all.append(m)
+        with render_lock:
+            st["clips"] += 1
+            chosen_all.append(m)
         print(f"  clip listo: {m['title']} ({m['score']}%)", flush=True)
+        if t.get("command"):
+            db.finish_command(t["command"]["id"], True, "Listo", cid)
+
+    def make_clip(m, command=None):
+        """Encola el momento m (tiempos de la grabación). Devuelve el id del clip, o None si no hay video de ese tramo."""
+        cov = [s for s in segs if s["end"] > m["start"] and s["start"] < m["end"] and s["path"].exists()]
+        if cov:
+            # si el tramo cruza una reconexión, se queda solo con la última parte seguida (no se pueden pegar dos sesiones)
+            last = cov[-1]["session"]
+            cov = [s for s in cov if s["session"] == last]
+        if not cov:
+            if command:
+                db.finish_command(command["id"], False, "Ese tramo ya no está en el disco")
+            return None
+        cid = str(uuid.uuid4())
+        base = cov[0]["start"]
+        cov = [dict(s) for s in cov]     # copia: el hilo no debe leer la lista que sigue llenando el bucle
+        wend = cov[-1]["end"]
+        mstart = max(m["start"], base)
+        end = min(m["end"], wend)
+        all_words_snapshot = list(all_words)
+        rel_words = [{**w, "start": w["start"] - base, "end": w["end"] - base}
+                     for w in all_words_snapshot if w["end"] >= base and w["start"] <= wend]
+        try:   # que el texto de arriba enganche también en los clips del directo
+            live_hook = hooks.best_hook(m.get("hook"), m["title"], rel_words, mstart - base, end - base)
+        except Exception:  # noqa: BLE001
+            live_hook = m.get("hook") or m["title"]
+        clip_queue.put({
+            "cid": cid, "cov": cov, "base": base, "mstart": mstart, "end": end,
+            "m": m, "words": rel_words, "all_words": all_words_snapshot,
+            "custom_crop": src.get("custom_crop"), "layout": src.get("layout"), "brand": st.get("brand"),
+            "hook": live_hook, "profile": prof, "opts": {**opts, "live_fast": True},
+            "user_id": src.get("user_id"), "command": command,
+        })
         return cid
+
+    def _clip_worker():
+        while True:
+            t = clip_queue.get()
+            try:
+                if t is None:
+                    return
+                try:
+                    _save_clip(t)
+                except Exception as e:  # noqa: BLE001 (un clip malo no debe tumbar el directo)
+                    print(f"  aviso: no pude crear el clip '{t['m']['title']}': {e}", flush=True)
+                    if t.get("command"):
+                        try:
+                            db.finish_command(t["command"]["id"], False, f"{type(e).__name__}: {e}")
+                        except Exception:  # noqa: BLE001
+                            pass
+            finally:
+                clip_queue.task_done()
 
     def review():
         window_from = max(0.0, st["offset"] - 6 * 60)
@@ -379,11 +424,7 @@ def process_live(job):
         m = {"start": start, "end": end, "score": 70, "title": meta["title"], "hook": meta["hook"],
              "description": meta["description"], "hashtags": meta["hashtags"],
              "reason": "Clip manual (botón Clip ahora)"}
-        cid = make_clip(m)
-        if cid:
-            db.finish_command(c["id"], True, "Listo", cid)
-        else:
-            db.finish_command(c["id"], False, "Ese tramo ya no está en el disco")
+        make_clip(m, command=c)   # el hilo avisa cuando el clip ya está subido
 
     def handle_commands(force=False):
         for c in db.pending_commands(sid):
@@ -444,6 +485,8 @@ def process_live(job):
         db.set_source(sid, error=None, progress={})
         st["brand"] = brand.load(work, template=opts.get("brand_template"))
         st["brand"]["progress_bar"] = bool(opts.get("progress_bar"))
+        render_thread = threading.Thread(target=_clip_worker, name="live-clip-render", daemon=True)
+        render_thread.start()
         inputs, maps, title = _resolve(src["url"], quality)
         proc = _start_ffmpeg(inputs, maps, seg_dir, logf, st["session"])
         db.set_source(sid, title=title, status="recording")
@@ -513,6 +556,8 @@ def process_live(job):
             if st["offset"] - st["last_review"] >= review_sec or (final and st["offset"] - st["last_review"] >= 20):
                 review()
             handle_commands(force=final)
+            if final:
+                clip_queue.join()   # el directo ya terminó: espera a que los clips en cola terminen de subir
 
             db.set_progress(sid, recorded_sec=int(time.time() - t0), transcribed_sec=int(st["offset"]),
                             reviews=st["reviews"], clips=st["clips"], reconnects=st["reconnects"], state=st["state"],
@@ -542,5 +587,9 @@ def process_live(job):
             chat.stop()
         if proc:
             _stop_ffmpeg(proc)
+        if render_thread:
+            clip_queue.join()
+            clip_queue.put(None)
+            render_thread.join()
         logf.close()
         shutil.rmtree(work, ignore_errors=True)

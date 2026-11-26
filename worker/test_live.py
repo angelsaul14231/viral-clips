@@ -133,9 +133,9 @@ def test_live_flow():
     sys.modules["brand"] = types.SimpleNamespace(load=lambda w, template=None: {})
 
     def fake_render(win, words, start, end, out, work, **kw):
-        rec["renders"].append((round(start, 1), round(end, 1), kw.get("hook")))
+        rec["renders"].append((round(start, 1), round(end, 1), kw.get("hook"), kw["opts"]))
         Path(out).write_bytes(b"x" * 100)
-    sys.modules["render"] = types.SimpleNamespace(render_clip=fake_render)
+    sys.modules["render"] = types.SimpleNamespace(render_clip=fake_render, sync_words_for_clip=lambda words, start, end: [])
 
     def fake_transcribe(f, work):
         dur = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(f)],
@@ -207,6 +207,7 @@ def test_live_flow():
     assert last["reconnects"] == 1 and last["chat_msgs"] == 123, last
     assert last["transcribed_sec"] >= (28 if rec.get("paced") else 38), last              # 2 sesiones de 20 s: la grabación sigue después de reconectar
     assert rec["review"], "no hubo ninguna revisión"
+    assert rec["renders"] and all(r[3].get("live_fast") for r in rec["renders"]), rec["renders"]
     r0 = rec["review"][0]
     assert r0["profile"] == "juego" and r0["game"] == "Counter" and r0["max_new"] == 2 and r0["min_score"] == 50, r0
     assert any(m in r0["hot"] for m in "🔊🎮💬"), r0          # llegaron pistas a la IA

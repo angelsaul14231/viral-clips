@@ -355,15 +355,16 @@ def _flag(opt, default):
     return default if v is None else v
 
 
-def _encode(cmd_head, cmd_tail, vb, workdir):
+def _encode(cmd_head, cmd_tail, vb, workdir, preset=None):
     import encoder
+    preset = preset or config.CLIP_PRESET
     kind = encoder.pick()
-    r = subprocess.run(cmd_head + encoder.video_args(kind, config.CLIP_CRF, config.CLIP_PRESET, vb) + cmd_tail,
+    r = subprocess.run(cmd_head + encoder.video_args(kind, config.CLIP_CRF, preset, vb) + cmd_tail,
                        cwd=workdir, capture_output=True, text=True)
     if r.returncode != 0 and kind != "cpu":
         print(f"  Codificador {kind} falló; repito con CPU.", flush=True)
         encoder.mark_bad(kind)
-        r = subprocess.run(cmd_head + encoder.video_args("cpu", config.CLIP_CRF, config.CLIP_PRESET, vb) + cmd_tail,
+        r = subprocess.run(cmd_head + encoder.video_args("cpu", config.CLIP_CRF, preset, vb) + cmd_tail,
                            cwd=workdir, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError("ffmpeg falló: " + r.stderr[-600:])
@@ -397,6 +398,7 @@ def _render_core(source: Path, words, start: float, end: float, out: Path, workd
     import postfx
     dur = end - start
     opts = opts or {}
+    fast = bool(opts.get("live_fast"))   # directos: prioridad que no se atragante la grabación
     layout = (layout or config.CLIP_LAYOUT or "crop").strip().lower()
     if layout not in ("crop", "blur", "duo", *SPLIT_TOPS):
         layout = "crop"
@@ -467,7 +469,8 @@ def _render_core(source: Path, words, start: float, end: float, out: Path, workd
         graph += ";" + postfx.slow_video(cur, "vS", slow)
         cur = "vS"
     # CAS + unsharp al FINAL: si se aplican antes del zoom, el reescalado se come el filo.
-    p = _polish()
+    # En directos se saltan: a 1080x1920 con eval=frame son los filtros que más frenan.
+    p = "" if fast else _polish()
     if p:
         graph += f";[{cur}]{p}[vP]"
         cur = "vP"
@@ -506,5 +509,5 @@ def _render_core(source: Path, words, start: float, end: float, out: Path, workd
     vb = _bitrate(dur_out)
     head = ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-t", f"{dur:.2f}"] + inputs + ["-filter_complex", graph, "-map", "[out]"] + amap
     tail = ["-r", str(config.CLIP_OUTPUT_FPS), "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(out.resolve())]
-    _encode(head, tail, vb, workdir)
+    _encode(head, tail, vb, workdir, preset=config.LIVE_CLIP_PRESET if fast else None)
     return out
