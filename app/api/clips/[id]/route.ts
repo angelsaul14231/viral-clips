@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { serverClient } from "@/lib/supabase";
+import { removeClipFiles } from "@/lib/storage";
 import { nextSlot } from "@/lib/slots";
 
 export const dynamic = "force-dynamic";
@@ -12,8 +13,8 @@ export async function DELETE(_req: Request, { params }: { params: { id: string }
   if (fetchError || !clip) return NextResponse.json({ error: "Clip no encontrado" }, { status: 404 });
 
   if (clip.storage_path) {
-    const { error } = await db.storage.from("clips").remove([clip.storage_path]);
-    if (error) console.error("Error borrando archivo:", error.message);
+    const { error } = await removeClipFiles([clip.storage_path], db);
+    if (error) console.error("Error borrando archivo:", error);
   }
   const { error: deleteError } = await db.from("clips").delete().eq("id", params.id);
   if (deleteError) return NextResponse.json({ error: deleteError.message }, { status: 500 });

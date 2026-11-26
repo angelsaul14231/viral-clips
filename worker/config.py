@@ -11,6 +11,15 @@ except ImportError:
 SUPABASE_URL = os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 
+# Storage de clips. 'supabase' (por defecto, sin cambios) o 'r2' (Cloudflare R2, egress gratis).
+# El bucket 'uploads' sigue siempre en Supabase: solo se mueven los MP4/miniaturas de clips.
+STORAGE_DRIVER = (os.environ.get("STORAGE_DRIVER") or "supabase").strip().lower()
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "")
+R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
+R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+R2_CLIPS_BUCKET = os.environ.get("R2_CLIPS_BUCKET", "clips")
+R2_ENDPOINT = os.environ.get("R2_ENDPOINT", "")
+
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 

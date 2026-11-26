@@ -5,6 +5,7 @@ from pathlib import Path
 from supabase import create_client
 
 import config
+import storage  # clips en Supabase o R2 según STORAGE_DRIVER (uploads sigue en Supabase)
 
 sb = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 
@@ -88,7 +89,7 @@ def reset_source_outputs(source_id):
     paths = [p for r in drop for p in (r.get("storage_path"), r.get("thumb_path")) if p]
     if paths:
         try:
-            sb.storage.from_("clips").remove(paths)
+            storage.remove("clips", paths)
         except Exception:  # noqa: BLE001
             pass
     for r in drop:
@@ -126,7 +127,7 @@ def save_rejected(source_id, rejected):
 
 def upload_clip(path, local_file):
     with open(local_file, "rb") as f:
-        sb.storage.from_("clips").upload(path, f.read(), {"content-type": "video/mp4", "upsert": "true"})
+        storage.upload("clips", path, f.read(), "video/mp4")
 
 
 # ----------------------------------------------------------------------------- Modo Transformar (bucket 'uploads')
@@ -237,11 +238,11 @@ def clips_needing_viral(limit=3):
 
 def upload_thumb(path, local_file):
     with open(local_file, "rb") as f:
-        sb.storage.from_("clips").upload(path, f.read(), {"content-type": "image/jpeg", "upsert": "true"})
+        storage.upload("clips", path, f.read(), "image/jpeg")
 
 
 def download_clip(path):
-    return sb.storage.from_("clips").download(path)
+    return storage.download("clips", path)
 
 
 def due_clips(limit=5):
@@ -287,7 +288,7 @@ def update_clip(clip_id, **fields):
 
 def remove_file(path):
     try:
-        sb.storage.from_("clips").remove([path])
+        storage.remove("clips", [path])
     except Exception:  # noqa: BLE001
         pass
 
@@ -394,11 +395,7 @@ def create_live_source(ch, found):
 
 # ----------------------------------------------------------------------------- Parte 8: cola de publicación (tabla posts, migración 0010)
 def signed_url(path, seconds=3600):
-    r = sb.storage.from_("clips").create_signed_url(path, seconds)
-    u = r.get("signedURL") or r.get("signed_url") or r.get("signedUrl")
-    if u and not u.startswith("http"):
-        u = f"{config.SUPABASE_URL.rstrip('/')}/storage/v1{u if u.startswith('/') else '/' + u}"
-    return u
+    return storage.signed_url("clips", path, seconds)
 
 
 def clips_ready_for_queue(networks, limit=10):

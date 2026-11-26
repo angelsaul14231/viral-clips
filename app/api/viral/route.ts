@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { serverClient } from "@/lib/supabase";
+import { signClipPaths } from "@/lib/storage";
 import { cleanTags, STYLE_IDS } from "@/lib/viral";
 import type { Viral } from "@/lib/types";
 
@@ -50,8 +51,8 @@ export async function GET(req: Request) {
   const paths = rows.flatMap((r) => [r.storage_path, r.thumb_path, r.thumb_b_path]).filter((p): p is string => !!p);
   const url = new Map<string, string>();
   if (paths.length) {
-    const s = await db.storage.from("clips").createSignedUrls(paths, 3600);
-    s.data?.forEach((x) => x.path && x.signedUrl && url.set(x.path, x.signedUrl));
+    const s = await signClipPaths(paths, 3600, false, db);
+    s.forEach((x) => x.signedUrl && url.set(x.path, x.signedUrl));
   }
 
   // 4) dónde está ya en cola
