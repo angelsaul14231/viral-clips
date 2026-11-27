@@ -35,6 +35,37 @@ function r2Ready(): boolean {
   return Boolean(endpoint && process.env.R2_ACCESS_KEY_ID && process.env.R2_SECRET_ACCESS_KEY);
 }
 
+/** Estado SIN secretos, para saber qué deployment está usando qué almacenaje. */
+export function storageStatus() {
+  return {
+    driver: clipsOnR2() ? "r2" : "supabase",
+    endpointSet: Boolean(process.env.R2_ENDPOINT || process.env.R2_ACCOUNT_ID),
+    accessKeySet: Boolean(process.env.R2_ACCESS_KEY_ID),
+    secretSet: Boolean(process.env.R2_SECRET_ACCESS_KEY),
+    bucket: process.env.R2_CLIPS_BUCKET || CLIPS_BUCKET,
+    region: process.env.R2_REGION || "auto",
+  };
+}
+
+/** Prueba real contra S3 (sin exponer llaves): detecta claves viejas en Vercel. */
+export async function probeR2(): Promise<{ ok: boolean; code?: string; error?: string }> {
+  if (!clipsOnR2()) return { ok: true };
+  if (!r2Ready()) return { ok: false, error: "Faltan variables R2 en este deployment" };
+  try {
+    const { HeadBucketCommand } = await import("@aws-sdk/client-s3");
+    const client = await s3();
+    await client.send(new HeadBucketCommand({ Bucket: process.env.R2_CLIPS_BUCKET || CLIPS_BUCKET }));
+    return { ok: true };
+  } catch (e: any) {
+    const code = String(e?.name || e?.Code || "Error");
+    const raw = String(e?.message || e);
+    const safe = /InvalidAccessKeyId|access key/i.test(raw)
+      ? "La Access Key ID no existe: actualízala en Vercel y redeploya."
+      : raw.slice(0, 160);
+    return { ok: false, code, error: safe };
+  }
+}
+
 async function signR2(paths: string[], seconds: number, download: boolean): Promise<SignedClip[]> {
   if (!r2Ready()) return paths.map((path) => ({ path, signedUrl: null }));
   const { GetObjectCommand } = await import("@aws-sdk/client-s3");
