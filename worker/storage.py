@@ -23,7 +23,8 @@ def _env(name, default=""):
 
 def uses_r2(bucket=CLIPS_BUCKET):
     """Solo el bucket de clips se mueve a R2; el resto sigue igual."""
-    driver = os.environ.get("STORAGE_DRIVER", config.STORAGE_DRIVER) or "supabase"
+    # load_dotenv() ya puso .env en os.environ; si no hay nada, el default es Supabase.
+    driver = os.environ.get("STORAGE_DRIVER") or "supabase"
     return driver.strip().lower() == "r2" and bucket == CLIPS_BUCKET
 
 
