@@ -6,16 +6,57 @@ import { GRAPH_BASE } from "./graph";
 
 export type Page = { id: string; name: string };
 export type Project = { id: number; nombre: string; paginas: Page[]; error?: string };
+export type AutopilotConfig = {
+  enabled: boolean;
+  page_ids: string[];
+  auto_approve: boolean;
+  max_per_run: number;
+  updated_at?: string | null;
+};
 
-/** Solo el worker (con la llave de servicio de Supabase) puede pedir el token de una página. */
-export function autorizadoServicio(authHeader: string | null): boolean {
-  const esperado = limpiarEnv(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY);
-  const recibido = (authHeader || "").replace(/^Bearer\s+/i, "").trim();
-  if (!esperado || !recibido) return false;
-  return crypto.timingSafeEqual(
-    crypto.createHash("sha256").update(esperado).digest(),
-    crypto.createHash("sha256").update(recibido).digest(),
-  );
+/**
+ * Worker y web pueden estar en Supabase distintos. El puente se firma con el secreto
+ * de Tigris/R2, que ya existe en worker/.env y en Vercel (mismo valor, sin enviarlo nunca).
+ */
+function secretoCompartido(): string {
+  return limpiarEnv(process.env.R2_SECRET_ACCESS_KEY || "");
+}
+
+export function autorizadoWorker(rawBody: string, header: string | null): boolean {
+  const secreto = secretoCompartido();
+  const firma = (header || "").trim();
+  if (!secreto || !/^[a-f0-9]{64}$/i.test(firma)) return false;
+  const esperada = crypto.createHmac("sha256", secreto).update(rawBody).digest("hex");
+  return crypto.timingSafeEqual(Buffer.from(esperada, "hex"), Buffer.from(firma, "hex"));
+}
+
+export async function leerConfig(): Promise<{ error: string | null; data: AutopilotConfig }> {
+  const vacia: AutopilotConfig = { enabled: false, page_ids: [], auto_approve: true, max_per_run: 5, updated_at: null };
+  if (!secretoCompartido()) return { error: "Falta R2_SECRET_ACCESS_KEY en Vercel (la misma de worker/.env)", data: vacia };
+  const { data, error } = await supabaseAdmin
+    .from("connections")
+    .select("data,updated_at")
+    .eq("network", "autopilot")
+    .maybeSingle();
+  if (error) {
+    const m = /check constraint/i.test(error.message) && /network/i.test(error.message)
+      ? "Falta correr 0020_autopiloto.sql en la Supabase de la web"
+      : /connections/i.test(error.message)
+        ? "Falta correr 0013_conexiones.sql en la Supabase de la web"
+        : error.message;
+    return { error: m, data: vacia };
+  }
+  const d = (data?.data ?? {}) as Record<string, unknown>;
+  return {
+    error: null,
+    data: {
+      enabled: Boolean(d.enabled),
+      page_ids: (Array.isArray(d.page_ids) ? d.page_ids : []).map(String).filter((x) => /^\d+$/.test(x)),
+      auto_approve: d.auto_approve === undefined ? true : Boolean(d.auto_approve),
+      max_per_run: Math.max(1, Math.min(25, Number(d.max_per_run) || 5)),
+      updated_at: data?.updated_at ?? null,
+    },
+  };
 }
 
 /** Cuentas de Facebook conectadas por OAuth (proyectos) y sus páginas. Nunca devuelve tokens. */

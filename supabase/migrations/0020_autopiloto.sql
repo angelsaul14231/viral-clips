@@ -9,29 +9,33 @@ DECLARE
   c record;
 BEGIN
   FOR c IN
-    SELECT conname FROM pg_constraint
-    WHERE conrelid = 'public.connections'::regclass
-      AND contype = 'c'
-      AND pg_get_constraintdef(conoid) ILIKE '%network%'
+    SELECT conname FROM pg_constraint AS pc
+    WHERE pc.conrelid = 'public.connections'::regclass
+      AND pc.contype = 'c'
+      AND pg_get_constraintdef(pc.oid) ILIKE '%network%'
   LOOP
     EXECUTE format('ALTER TABLE public.connections DROP CONSTRAINT %I', c.conname);
   END LOOP;
 
   FOR c IN
-    SELECT conname FROM pg_constraint
-    WHERE conrelid = 'public.posts'::regclass
-      AND contype = 'c'
-      AND pg_get_constraintdef(conoid) ILIKE '%network%'
+    SELECT conname FROM pg_constraint AS pc
+    WHERE pc.conrelid = 'public.posts'::regclass
+      AND pc.contype = 'c'
+      AND pg_get_constraintdef(pc.oid) ILIKE '%network%'
   LOOP
     EXECUTE format('ALTER TABLE public.posts DROP CONSTRAINT %I', c.conname);
   END LOOP;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.connections'::regclass AND conname = 'connections_network_check') THEN
+    ALTER TABLE public.connections ADD CONSTRAINT connections_network_check
+      CHECK (network IN ('facebook','instagram','youtube','autopilot'));
+  END IF;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = 'public.posts'::regclass AND conname = 'posts_network_check') THEN
+    ALTER TABLE public.posts ADD CONSTRAINT posts_network_check
+      CHECK (network IN ('facebook','instagram','youtube') OR network ~ '^facebook:[0-9]+$');
+  END IF;
 END $$;
-
-ALTER TABLE public.connections ADD CONSTRAINT connections_network_check
-  CHECK (network IN ('facebook','instagram','youtube','autopilot'));
-
-ALTER TABLE public.posts ADD CONSTRAINT posts_network_check
-  CHECK (network IN ('facebook','instagram','youtube') OR network ~ '^facebook:[0-9]+$');
 
 -- La tabla puede existir sin la fila: el panel la crea al encender el piloto.
 INSERT INTO public.connections (network, data)

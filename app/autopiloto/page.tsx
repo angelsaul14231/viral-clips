@@ -4,12 +4,12 @@ import Link from "next/link";
 
 type Page = { id: string; name: string; project?: string; projectId?: number };
 type Project = { id: number; nombre: string; paginas: { id: string; name: string }[]; error?: string };
-type Config = { enabled: boolean; page_ids: string[]; auto_approve: boolean; max_per_run: number };
+type Config = { enabled: boolean; page_ids: string[]; auto_approve: boolean; max_per_run: number; updated_at?: string | null };
 type Data = {
   config: Config;
   projects: Project[];
   pages: Page[];
-  status: { workerAlive: boolean; seenAt: string | null; workerAutopilot: boolean; workerPages: string[]; clipsReady: number; queued: number; published: number };
+  status: { savedAt: string | null; workerSyncsEvery: string; queueEvery: string };
   error?: string;
 };
 
@@ -65,7 +65,7 @@ export default function Autopiloto() {
         : action === "apagar"
           ? `Piloto apagado.${warnings}`
           : action === "encolar"
-            ? `${j?.queued ?? 0} publicación(es) metidas en la cola.${warnings}`
+            ? `Config guardada. El worker encola lo listo en ~2 min.${warnings}`
             : `Páginas guardadas.${warnings}`,
     );
     await load();
@@ -96,10 +96,10 @@ export default function Autopiloto() {
         <div>
           <b style={{ fontSize: 18 }}>{cfg?.enabled ? "🟢 Piloto ENCENDIDO" : "⚪ Piloto APAGADO"}</b>
           <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>
-            Worker: {st?.workerAlive ? "activo" : "sin señal"} · {st?.clipsReady ?? 0} clips listos · {st?.queued ?? 0} en cola · {st?.published ?? 0} publicados
+            {st?.savedAt ? `Guardado: ${new Date(st.savedAt).toLocaleString()}` : "Aún no se guardó configuración"}
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
-            El worker ve el cambio en ~15 s · páginas activas: {st?.workerPages?.length ?? 0}{st?.workerAutopilot ? " (sincronizado)" : " (esperando)"}
+            El worker lee el cambio cada {st?.workerSyncsEvery ?? "15 s"} y encola cada {st?.queueEvery ?? "2 min"} · páginas marcadas: {cfg?.page_ids?.length ?? 0}
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -155,7 +155,7 @@ export default function Autopiloto() {
           />
         </label>
         <small style={{ color: "var(--muted)" }}>
-          Para que el worker publique por cada página, abre una vez /almacenamiento y comprueba que la conexión esté OK, y ejecuta la migración <code>supabase/migrations/0020_autopiloto.sql</code> en Supabase si aún no la corriste.
+          Corre <code>supabase/migrations/0020_autopiloto.sql</code> en <b>las dos Supabase</b>: la de la web (donde está tu cuenta de Facebook) y la del worker (donde están los clips). La firma usa la misma llave R2/Tigris que ya configuramos; abre una vez /almacenamiento y comprueba que diga Conexión OK.
         </small>
       </div>
     </>

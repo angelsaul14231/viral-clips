@@ -4,6 +4,8 @@ Corre en un hilo propio (start_thread) para que un directo largo o un render no 
 Seguridad contra publicar dos veces: el post se reserva (queued -> publishing) ANTES de subir; si el worker se cae a mitad queda en
 'error: interrumpido' y NO se repite solo. Un error NO se reintenta solo (podría ya haber salido); lo reintentas tú desde la web.
 """
+import hashlib
+import hmac
 import json
 import threading
 import time
@@ -61,9 +63,13 @@ def publish_to_page(page_id, post, clip):
         "post_id": str(post.get("id") or ""), "page_id": str(page_id),
         "storage_path": clip["storage_path"], "title": title, "message": text,
     }).encode("utf-8")
+    secret = config.R2_SECRET_ACCESS_KEY
+    if not secret:
+        raise RuntimeError("Falta R2_SECRET_ACCESS_KEY en worker/.env (firma del piloto)")
+    firma = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
     req = urllib.request.Request(
         f"{config.WEB_URL}/api/autopiloto/publicar", data=body, method="POST",
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {config.SUPABASE_KEY}"},
+        headers={"Content-Type": "application/json", "X-Autopiloto": firma},
     )
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:

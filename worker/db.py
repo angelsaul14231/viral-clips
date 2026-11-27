@@ -844,38 +844,78 @@ def auto_queue_on():
 
 
 # ----------------------------------------------------------------------------- Piloto automático multi-página
-# Se guarda en la fila `connections` con network='autopilot' (tabla 0013, sin migración nueva).
-# La web la escribe desde /autopiloto; el worker la lee en caliente cada ~15 s.
+# La config vive en la Supabase de la WEB (donde están las cuentas de Facebook conectadas).
+# Worker y web pueden tener proyectos distintos: el puente se firma con R2_SECRET_ACCESS_KEY.
 _ap = {"at": 0.0, "row": {}}
 
 
+def _normalize_autopilot(d):
+    """Limpia la config que venga de la web (o de la fila local de respaldo)."""
+    if not isinstance(d, dict):
+        return {}
+    ids = []
+    for v in (d.get("page_ids") or []):
+        v = str(v).strip()
+        if v.isdigit() and v not in ids:
+            ids.append(v)
+    try:
+        cap = max(1, min(25, int(d.get("max_per_run") or 5)))
+    except (TypeError, ValueError):
+        cap = 5
+    return {
+        "enabled": str(d.get("enabled", "")).lower() not in ("", "0", "false", "no", "off"),
+        "page_ids": ids,
+        "auto_approve": str(d.get("auto_approve", "1")).lower() not in ("0", "false", "no", "off"),
+        "max_per_run": cap,
+    }
+
+
 def autopilot_config(every=15):
-    """Config del piloto: {enabled, page_ids, auto_approve, max_per_run}. Sin fila = apagado."""
+    """Config del piloto: {enabled, page_ids, auto_approve, max_per_run}. Sin web = apagado."""
+    import hashlib
+    import hmac
+    import json as _json
     import time as _t
+    import urllib.request as _url
+
     if _t.time() - _ap["at"] < every:
         return _ap["row"]
+
     row = {}
+    secret = config.R2_SECRET_ACCESS_KEY
     try:
-        rows = sb.table("connections").select("data").eq("network", "autopilot").limit(1).execute().data or []
-        d = (rows[0].get("data") or {}) if rows else {}
-        if isinstance(d, dict):
-            ids = []
-            for v in (d.get("page_ids") or []):
-                v = str(v).strip()
-                if v.isdigit() and v not in ids:
-                    ids.append(v)
-            try:
-                cap = max(1, min(25, int(d.get("max_per_run") or 5)))
-            except (TypeError, ValueError):
-                cap = 5
-            row = {
-                "enabled": str(d.get("enabled", "")).lower() not in ("", "0", "false", "no", "off"),
-                "page_ids": ids,
-                "auto_approve": str(d.get("auto_approve", "1")).lower() not in ("0", "false", "no", "off"),
-                "max_per_run": cap,
-            }
-    except Exception:  # noqa: BLE001  (sin la fila: el piloto queda apagado y nada se rompe)
+        if config.WEB_URL and secret:
+            body = _json.dumps({"worker": True}).encode("utf-8")
+            firma = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+            req = _url.Request(
+                f"{config.WEB_URL}/api/autopiloto", data=body, method="POST",
+                headers={"Content-Type": "application/json", "X-Autopiloto": firma},
+            )
+            with _url.urlopen(req, timeout=12) as resp:
+                out = _json.loads(resp.read().decode("utf-8") or "{}")
+            if out.get("ok") and isinstance(out.get("config"), dict):
+                row = _normalize_autopilot(out["config"])
+    except Exception:  # noqa: BLE001  (la web no responde: se usa el respaldo local)
         row = {}
+
+    if not row:
+        try:
+            rows = sb.table("connections").select("data").eq("network", "autopilot").limit(1).execute().data or []
+            row = _normalize_autopilot((rows[0].get("data") or {}) if rows else {})
+        except Exception:  # noqa: BLE001
+            row = {}
+
+    if row.get("enabled"):
+        # Los interruptores viven en la BD del worker; encender el piloto los activa aquí también.
+        for sql in (
+            lambda: sb.table("app_switches").upsert({"id": 1, "discover": True, "auto_queue": True}).execute(),
+            lambda: sb.table("viral_config").upsert({"id": 1, "require_approval": False}).execute(),
+        ):
+            try:
+                sql()
+            except Exception:  # noqa: BLE001
+                pass
+
     _ap["at"], _ap["row"] = _t.time(), row
     return row
 

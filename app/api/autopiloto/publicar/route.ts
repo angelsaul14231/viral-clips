@@ -1,18 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { autorizadoServicio, tokenDePagina } from "@/lib/autopilot";
+import { autorizadoWorker, tokenDePagina } from "@/lib/autopilot";
 import { signClipPaths } from "@/lib/storage";
 import { publicarEnPagina } from "@/lib/fbServer";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-// El worker llama aquí con su llave de servicio: la web firma el clip (Tigris o Supabase),
-// consigue el token fresco de la página y publica el Reel. Ningún token sale al navegador.
+// El worker llama aquí firmando el cuerpo con R2_SECRET_ACCESS_KEY (la misma llave de Tigris).
+// La web busca el token fresco de la página en su Supabase, firma el clip y publica el Reel.
 export async function POST(req: NextRequest) {
-  if (!autorizadoServicio(req.headers.get("authorization"))) {
-    return NextResponse.json({ ok: false, error: "No autorizado" }, { status: 401 });
+  const raw = await req.text();
+  if (!autorizadoWorker(raw, req.headers.get("x-autopiloto"))) {
+    return NextResponse.json({ ok: false, error: "No autorizado (falta la llave R2/Tigris en Vercel)" }, { status: 401 });
   }
-  const b = await req.json().catch(() => ({}));
+  let b: any = {};
+  try {
+    b = raw ? JSON.parse(raw) : {};
+  } catch {
+    return NextResponse.json({ ok: false, error: "JSON inválido" }, { status: 400 });
+  }
   const pageId = String(b.page_id ?? "");
   const path = String(b.storage_path ?? "");
   if (!/^\d{5,}$/.test(pageId)) return NextResponse.json({ ok: false, error: "Página no válida" }, { status: 400 });
