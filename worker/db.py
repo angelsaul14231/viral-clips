@@ -311,9 +311,23 @@ def heartbeat(info=None):
             _hb_warned = time.time()
 
 
+def _safe_write(fn, what):
+    """Escritura auxiliar (latidos/progreso): reintenta una vez y NUNCA tumba el directo."""
+    for attempt in range(2):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            if attempt == 0:
+                time.sleep(0.4)
+                continue
+            print(f"Aviso: no pude {what} ({str(e)[:140]}). Se reintentará en el próximo ciclo.", flush=True)
+            return None
+
+
 def touch_job(job_id):
     """Renueva locked_at para que un directo largo no se considere 'muerto'."""
-    sb.table("jobs").update({"locked_at": now()}).eq("id", job_id).execute()
+    _safe_write(lambda: sb.table("jobs").update({"locked_at": now()}).eq("id", job_id).execute(),
+                f"renovar el job {job_id}")
 
 
 def stop_requested(source_id) -> bool:
@@ -322,7 +336,9 @@ def stop_requested(source_id) -> bool:
 
 
 def set_progress(source_id, **p):
-    sb.table("sources").update({"progress": p}).eq("id", source_id).execute()
+    """Progreso del directo. Un corte momentáneo de Supabase no debe matar la grabación."""
+    _safe_write(lambda: sb.table("sources").update({"progress": p}).eq("id", source_id).execute(),
+                f"escribir el progreso de {source_id}")
 
 
 # ----------------------------------------------------------------------------- Parte 2: directos

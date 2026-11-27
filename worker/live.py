@@ -240,7 +240,18 @@ def process_live(job):
     tracker = voices.Tracker()   # Parte 5: la misma persona conserva su P1/P2 entre trozos
     all_words = []
     chosen_all = []
+    # Si el worker se reinicia, no debe olvidar los clips que ya sacó de este directo.
+    try:
+        prev = (db.sb.table("clips").select("id,title,start_sec,end_sec,captions")
+                .eq("source_id", sid).order("created_at", desc=True).limit(30).execute().data or [])
+        for c in prev:
+            words = " ".join(str(w.get("w", "")) for w in (c.get("captions") or []) if isinstance(w, dict))
+            chosen_all.append({"start": float(c["start_sec"]), "end": float(c["end_sec"]),
+                               "title": c.get("title") or "", "text": words})
+    except Exception as e:  # noqa: BLE001 (si falla, el directo sigue)
+        print(f"  aviso: no pude cargar clips anteriores ({str(e)[:140]})", flush=True)
     seen_rej = set()
+    pending_paths = set()   # trozos que un clip en cola todavía necesita; la limpieza no los toca
     done = set()
     lv_audio, lv_scene = {}, {}      # volumen (dB) y cambio de imagen por segundo de la grabación
     ev_combat, ev_screen = set(), {}   # segundos con tiroteo/explosión y {segundo: 'WASTED'...} (Parte 3)
@@ -346,6 +357,9 @@ def process_live(job):
         cov, base = t["cov"], t["base"]
         mstart, end = t["mstart"], t["end"]
         m = t["m"]
+        missing = [str(s["path"]) for s in cov if not s["path"].exists()]
+        if missing:
+            raise RuntimeError("Faltan trozos del directo antes de renderizar: " + ", ".join(missing[-2:]))
         lst = work / f"{cid}.txt"
         # La duración que concat debe usar es la del VIDEO: si el audio arranca desfasado o tiene cola,
         # format=duration es más larga y el concat mete un hueco entre trozos (audio y subtítulos se siguen
@@ -402,6 +416,7 @@ def process_live(job):
         cid = str(uuid.uuid4())
         base = cov[0]["start"]
         cov = [dict(s) for s in cov]     # copia: el hilo no debe leer la lista que sigue llenando el bucle
+        pending_paths.update(str(s["path"]) for s in cov)   # la limpieza no los borra hasta que el clip termine
         wend = cov[-1]["end"]
         mstart = max(m["start"], base)
         end = min(m["end"], wend)
@@ -424,6 +439,7 @@ def process_live(job):
     def _clip_worker():
         while True:
             t = clip_queue.get()
+            used = {str(s["path"]) for s in (t.get("cov") or [])} if t else set()
             try:
                 if t is None:
                     return
@@ -437,6 +453,7 @@ def process_live(job):
                         except Exception:  # noqa: BLE001
                             pass
             finally:
+                pending_paths.difference_update(used)
                 clip_queue.task_done()
 
     def review():
@@ -456,7 +473,8 @@ def process_live(job):
                       if prof.get("action") else win)
             print(f"  Pistas: {len(loud)} s de volumen alto, {len(motion)} s de acción, {len(hot_chat)} s de chat, "
                   f"{n_hot} frase(s) marcada(s)", flush=True)
-            known = [" ".join(s2["text"] for s2 in all_segments if s2["end"] > c["start"] and s2["start"] < c["end"])
+            known = [(c.get("text") or " ".join(s2["text"] for s2 in all_segments
+                      if s2["end"] > c["start"] and s2["start"] < c["end"]))
                      for c in chosen_all[-30:]] if (prof.get("dedupe") and config.DEDUPE) else []
             new, rej = review_window(ai_win, secs, chosen_all, st["offset"], min_score=min_score, max_new=max_new,
                                      words=words_win, profile=prof, game=game, known_texts=known)
@@ -472,7 +490,7 @@ def process_live(job):
             print(f"  aviso: revisión fallida: {e}", flush=True)
         # libera disco: los clips solo salen de los últimos minutos
         for s in segs:
-            if s["end"] < st["offset"] - 20 * 60:
+            if s["end"] < st["offset"] - 20 * 60 and str(s["path"]) not in pending_paths:
                 s["path"].unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ "Clip ahora"

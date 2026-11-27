@@ -58,44 +58,109 @@ def _sb():
     return db.sb.storage
 
 
-def upload(bucket, path, data, content_type):
-    if uses_r2(bucket):
-        client().put_object(Bucket=_bucket(bucket), Key=path, Body=data, ContentType=content_type)
-        return None
+def supabase_ready():
+    return bool(config.SUPABASE_URL and config.SUPABASE_KEY)
+
+
+def r2_ready():
+    endpoint = _env("R2_ENDPOINT") or (f"https://{_env('R2_ACCOUNT_ID')}.r2.cloudflarestorage.com" if _env("R2_ACCOUNT_ID") else "")
+    return bool(endpoint and _env("R2_ACCESS_KEY_ID") and _env("R2_SECRET_ACCESS_KEY"))
+
+
+def _warn(what, e):
+    print(f"Aviso: storage {what} falló ({str(e)[:140]}); uso el otro.", flush=True)
+
+
+def _r2_upload(bucket, path, data, content_type):
+    return client().put_object(Bucket=_bucket(bucket), Key=path, Body=data, ContentType=content_type)
+
+
+def _sb_upload(bucket, path, data, content_type):
     return _sb().from_(bucket).upload(path, data, {"content-type": content_type, "upsert": "true"})
 
 
-def download(bucket, path):
-    if uses_r2(bucket):
-        body = client().get_object(Bucket=_bucket(bucket), Key=path)["Body"]
-        return body.read()
+def _r2_download(bucket, path):
+    return client().get_object(Bucket=_bucket(bucket), Key=path)["Body"].read()
+
+
+def _sb_download(bucket, path):
     return _sb().from_(bucket).download(path)
 
 
-def signed_url(bucket, path, seconds=3600, download=False):
-    if uses_r2(bucket):
-        params = {"Bucket": _bucket(bucket), "Key": path}
-        if download:
-            name = path.rsplit("/", 1)[-1].replace('"', "")
-            params["ResponseContentDisposition"] = f'attachment; filename="{name}"'
-        try:
-            return client().generate_presigned_url("get_object", Params=params, ExpiresIn=int(seconds))
-        except Exception:  # noqa: BLE001  ( igual que el respaldo de Supabase: devolver None )
-            return None
+def _r2_sign(bucket, path, seconds, download):
+    params = {"Bucket": _bucket(bucket), "Key": path}
+    if download:
+        name = path.rsplit("/", 1)[-1].replace('"', "")
+        params["ResponseContentDisposition"] = f'attachment; filename="{name}"'
+    u = client().generate_presigned_url("get_object", Params=params, ExpiresIn=int(seconds))
+    return u or None
+
+
+def _sb_sign(bucket, path, seconds):
     r = _sb().from_(bucket).create_signed_url(path, seconds)
     u = r.get("signedURL") or r.get("signed_url") or r.get("signedUrl")
     if u and not u.startswith("http"):
         u = f"{config.SUPABASE_URL.rstrip('/')}/storage/v1{u if u.startswith('/') else '/' + u}"
-    return u
+    return u or None
+
+
+def _r2_remove(bucket, paths):
+    return client().delete_objects(Bucket=_bucket(bucket), Delete={"Objects": [{"Key": p} for p in paths]})
+
+
+def _sb_remove(bucket, paths):
+    return _sb().from_(bucket).remove(paths)
+
+
+def _two(bucket, r2_fn, sb_fn, *args, **kwargs):
+    """Clips: prueba el driver elegido y, si falla, el otro. El resto sigue solo en Supabase."""
+    if bucket != CLIPS_BUCKET:
+        return sb_fn(bucket, *args, **kwargs)
+    prefer_r2 = uses_r2(bucket)
+    order = []
+    if prefer_r2 and r2_ready():
+        order.append(("R2", r2_fn))
+    if supabase_ready():
+        order.append(("Supabase", sb_fn))
+    if not prefer_r2 and r2_ready():
+        order.append(("R2", r2_fn))
+    if not order:
+        return r2_fn(bucket, *args, **kwargs) if prefer_r2 else sb_fn(bucket, *args, **kwargs)
+    last = None
+    for name, fn in order:
+        try:
+            out = fn(bucket, *args, **kwargs)
+            if out is not None:      # una URL firmada vacía también cuenta como fallo
+                return out
+            last = None
+        except Exception as e:  # noqa: BLE001
+            last = e
+            _warn(name, e)
+    if last:
+        raise last
+    return None
+
+
+def upload(bucket, path, data, content_type):
+    return _two(bucket, _r2_upload, _sb_upload, path, data, content_type)
+
+
+def download(bucket, path):
+    out = _two(bucket, _r2_download, _sb_download, path)
+    if out is None:
+        raise RuntimeError(f"No se pudo descargar {path} de ningún storage")
+    return out
+
+
+def signed_url(bucket, path, seconds=3600, download=False):
+    return _two(bucket,
+                lambda b, p, s, d: _r2_sign(b, p, s, d),
+                lambda b, p, s, d: _sb_sign(b, p, s),
+                path, seconds, download)
 
 
 def remove(bucket, paths):
     paths = [p for p in paths if p]
     if not paths:
         return None
-    if uses_r2(bucket):
-        return client().delete_objects(
-            Bucket=_bucket(bucket),
-            Delete={"Objects": [{"Key": p} for p in paths]},
-        )
-    return _sb().from_(bucket).remove(paths)
+    return _two(bucket, _r2_remove, _sb_remove, paths)

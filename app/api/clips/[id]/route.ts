@@ -1,9 +1,37 @@
 import { NextResponse } from "next/server";
 import { serverClient } from "@/lib/supabase";
-import { removeClipFiles } from "@/lib/storage";
+import { removeClipFiles, signClipPaths } from "@/lib/storage";
 import { nextSlot } from "@/lib/slots";
 
 export const dynamic = "force-dynamic";
+
+/** Carga un clip para el editor: datos + URLs firmadas (Tigris o Supabase, con respaldo). */
+export async function GET(_req: Request, { params }: { params: { id: string } }) {
+  const db = serverClient();
+  if (!db) return NextResponse.json({ error: "Supabase no está conectado" }, { status: 503 });
+  const { data, error } = await db.from("clips").select("*").eq("id", params.id).maybeSingle();
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  if (!data) return NextResponse.json({ error: "Clip no encontrado" }, { status: 404 });
+
+  const { data: src } = await db.from("sources").select("kind,title,url").eq("id", data.source_id).maybeSingle();
+  const paths = [data.storage_path, data.thumb_path, data.thumb_b_path].filter(Boolean) as string[];
+  const [view, download] = await Promise.all([
+    paths.length ? signClipPaths(paths, 3600, false, db) : Promise.resolve([]),
+    data.storage_path ? signClipPaths([data.storage_path], 3600, true, db) : Promise.resolve([]),
+  ]);
+  const byPath = new Map(view.map((x) => [x.path, x.signedUrl]));
+  return NextResponse.json({
+    clip: {
+      ...data,
+      sourceKind: src?.kind ?? null,
+      sourceTitle: src?.title ?? null,
+      videoUrl: data.storage_path ? byPath.get(data.storage_path) ?? null : null,
+      downloadUrl: download[0]?.signedUrl ?? null,
+      thumbUrl: data.thumb_path ? byPath.get(data.thumb_path) ?? null : null,
+      thumbBUrl: data.thumb_b_path ? byPath.get(data.thumb_b_path) ?? null : null,
+    },
+  });
+}
 
 export async function DELETE(_req: Request, { params }: { params: { id: string } }) {
   const db = serverClient();
