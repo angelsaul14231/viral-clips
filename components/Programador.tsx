@@ -87,7 +87,7 @@ export default function Programador({ theme }: ProgramadorProps) {
     }
     setCargandoPaginas(true);
     setSeleccionadas(new Set());
-    fetch(`/api/accounts/${cuentaId}/paginas`)
+    fetch(`/api/fb/accounts/${cuentaId}/paginas`)
       .then((r) => r.json())
       .then((d) => {
         if (d.error) {
@@ -174,7 +174,7 @@ export default function Programador({ theme }: ProgramadorProps) {
 
   async function cancelar(id: number) {
     if (!confirm("¿Cancelar esta publicación programada?")) return;
-    const res = await fetch(`/api/schedule/${id}`, { method: "DELETE" });
+    const res = await fetch(`/api/fb/schedule/${id}`, { method: "DELETE" });
     if (res.ok) {
       toast.success("Cancelada");
       cargarPosts();

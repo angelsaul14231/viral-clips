@@ -145,6 +145,12 @@ export async function POST(req: Request) {
       }
     }
     if (typeof b.description === "string") upd.description = b.description.trim().slice(0, 2200);
+    // Gancho en pantalla: se guarda dentro del JSON viral para que el worker lo queme al renderizar.
+    if (typeof b.hook === "string") {
+      const viral: Record<string, unknown> = clip.viral && typeof clip.viral === "object" ? { ...clip.viral } : {};
+      viral.thumb_text = b.hook.trim().slice(0, 70);
+      upd.viral = viral;
+    }
     if (!Object.keys(upd).length) return fail("Nada que cambiar");
     if (pack) upd.pack = pack;
     return set(upd);

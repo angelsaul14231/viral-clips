@@ -97,10 +97,14 @@ export default function Biblioteca() {
   /** Pone otra vez en cola una fuente que falló (con las mismas opciones). */
   async function retry(id: string) {
     setCleaning(true);
-    const r = await fetch("/api/sources/retry", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) setErr(j.error ?? "No se pudo reintentar");
-    else setNote("Listo: lo puse otra vez en la cola.");
+    try {
+      const r = await fetch("/api/sources/retry", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) setErr(j.error ?? "No se pudo reintentar");
+      else setNote("Listo: lo puse otra vez en la cola.");
+    } catch {
+      setErr("No se pudo conectar con el servidor");
+    }
     setCleaning(false);
     reload.current();
   }

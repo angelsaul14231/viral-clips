@@ -34,14 +34,14 @@ export default function Cola({ theme }: { theme: Theme }) {
 
   async function cancelar(id: number) {
     if (!confirm("¿Cancelar esta publicación?")) return;
-    const r = await fetch(`/api/schedule/${id}`, { method: "DELETE" });
+    const r = await fetch(`/api/fb/schedule/${id}`, { method: "DELETE" });
     const d = await r.json().catch(() => ({}));
     r.ok ? toast.success("Cancelada") : toast.error(d.error || "No se pudo cancelar");
     cargar();
   }
 
   async function reintentar(id: number) {
-    const r = await fetch(`/api/schedule/${id}`, {
+    const r = await fetch(`/api/fb/schedule/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ accion: "reintentar" }),
