@@ -541,8 +541,13 @@ def main():
                 cp = Path(config.COOKIES_FILE)
                 if not cp.exists():
                     print(f"  ⚠ Archivo de cookies no encontrado: {config.COOKIES_FILE}", flush=True)
+        try:
+            _ap_cfg = db.autopilot_config()
+        except Exception:  # noqa: BLE001
+            _ap_cfg = {}
         db.BASE_INFO = {"auto_queue": db.auto_queue_on(), "discover": db.discover_on(), "switches": True, "networks": autoqueue.networks_available(),
-                        "stats": config.STATS, "learn_slots": config.LEARN_SLOTS, "learn_min_posts": config.LEARN_MIN_POSTS}
+                        "stats": config.STATS, "learn_slots": config.LEARN_SLOTS, "learn_min_posts": config.LEARN_MIN_POSTS,
+                        "autopilot": bool(_ap_cfg.get("enabled")), "autopilot_pages": _ap_cfg.get("page_ids") or []}
         db.heartbeat()
         if time.time() - last_clean > 600:
             db.requeue_stale()

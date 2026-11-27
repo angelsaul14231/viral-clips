@@ -273,7 +273,7 @@ create index if not exists clips_viral_status on public.clips (viral_status) whe
 create table if not exists public.posts (
   id           uuid primary key default gen_random_uuid(),
   clip_id      uuid not null references public.clips(id) on delete cascade,
-  network      text not null check (network in ('facebook','instagram','youtube')),
+  network      text not null check (network in ('facebook','instagram','youtube') or network ~ '^facebook:[0-9]+$'),
   status       text not null default 'queued' check (status in ('queued','publishing','published','error','cancelled')),
   scheduled_at timestamptz not null,
   external_id  text,
@@ -329,7 +329,7 @@ alter table public.discovered_videos enable row level security;
 
 -- NÃºmeros de cada publicaciÃ³n (Ãºltima lectura)
 create table if not exists public.post_stats (
-  network      text not null check (network in ('facebook','instagram','youtube')),
+  network      text not null check (network in ('facebook','instagram','youtube') or network ~ '^facebook:[0-9]+$'),
   external_id  text not null,
   post_id      uuid,
   clip_id      uuid references public.clips(id) on delete set null,
@@ -375,7 +375,7 @@ alter table public.page_followers enable row level security;
 -- ===== 0013 conexiones =====
 -- Guarda las llaves de tus redes. Solo el servidor (service role) puede leerlas: la web nunca las devuelve completas.
 create table if not exists public.connections (
-  network    text primary key check (network in ('facebook','instagram','youtube')),
+  network    text primary key check (network in ('facebook','instagram','youtube','autopilot')),
   data       jsonb not null default '{}'::jsonb,
   updated_at timestamptz not null default now()
 );

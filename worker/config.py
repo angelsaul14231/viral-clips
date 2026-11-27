@@ -21,6 +21,10 @@ R2_CLIPS_BUCKET = os.environ.get("R2_CLIPS_BUCKET", "clips")
 R2_ENDPOINT = os.environ.get("R2_ENDPOINT", "")
 R2_REGION = os.environ.get("R2_REGION", "auto")  # Tigris usa 'auto'; Backblaze B2 usa su región (ej. us-west-004)
 
+# Web de ClipForge: el worker le pide el token de cada página de Facebook y publica por ella.
+# No es un secreto: es la URL del deploy (Vercel). Se puede cambiar sin tocar código.
+WEB_URL = (os.environ.get("WEB_URL") or "https://viral-clips-nine.vercel.app").strip().rstrip("/")
+
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 

@@ -841,3 +841,107 @@ def discover_on():
 def auto_queue_on():
     """¿Está encendida la Cola automática? Botón de la web, o AUTO_QUEUE del .env si nunca lo tocaste."""
     return switch_on("auto_queue", config.AUTO_QUEUE)
+
+
+# ----------------------------------------------------------------------------- Piloto automático multi-página
+# Se guarda en la fila `connections` con network='autopilot' (tabla 0013, sin migración nueva).
+# La web la escribe desde /autopiloto; el worker la lee en caliente cada ~15 s.
+_ap = {"at": 0.0, "row": {}}
+
+
+def autopilot_config(every=15):
+    """Config del piloto: {enabled, page_ids, auto_approve, max_per_run}. Sin fila = apagado."""
+    import time as _t
+    if _t.time() - _ap["at"] < every:
+        return _ap["row"]
+    row = {}
+    try:
+        rows = sb.table("connections").select("data").eq("network", "autopilot").limit(1).execute().data or []
+        d = (rows[0].get("data") or {}) if rows else {}
+        if isinstance(d, dict):
+            ids = []
+            for v in (d.get("page_ids") or []):
+                v = str(v).strip()
+                if v.isdigit() and v not in ids:
+                    ids.append(v)
+            try:
+                cap = max(1, min(25, int(d.get("max_per_run") or 5)))
+            except (TypeError, ValueError):
+                cap = 5
+            row = {
+                "enabled": str(d.get("enabled", "")).lower() not in ("", "0", "false", "no", "off"),
+                "page_ids": ids,
+                "auto_approve": str(d.get("auto_approve", "1")).lower() not in ("0", "false", "no", "off"),
+                "max_per_run": cap,
+            }
+    except Exception:  # noqa: BLE001  (sin la fila: el piloto queda apagado y nada se rompe)
+        row = {}
+    _ap["at"], _ap["row"] = _t.time(), row
+    return row
+
+
+def autopilot_on():
+    """¿Está encendido el piloto automático? (sin tabla 0013 = no)."""
+    return bool(autopilot_config().get("enabled"))
+
+
+def autopilot_pages():
+    """IDs de páginas de Facebook donde debe publicar el piloto."""
+    return list(autopilot_config().get("page_ids") or [])
+
+
+def clips_ready_for_autopilot(page_ids, limit=10, auto_approve=False):
+    """Clips virales listos/aprobados que aún NO tienen post en ninguna de estas páginas.
+    Con auto_approve=True, los 'ready' pasan a 'approved' solos (piloto 100% automático)."""
+    if not page_ids:
+        return []
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(days=config.QUEUE_CLIP_DAYS)).isoformat()
+        statuses = ["approved"] if (require_approval() and not auto_approve) else ["ready", "approved"]
+        rows = (sb.table("clips").select("id,title,viral,viral_score,viral_status,publish_status,storage_path")
+                .in_("viral_status", statuses).gte("created_at", since).not_.is_("storage_path", "null")
+                .order("created_at", desc=True).limit(60).execute().data or [])
+        rows = [r for r in rows if r.get("publish_status") not in ("scheduled", "published")]
+        if not rows:
+            return []
+        if auto_approve:
+            pending = [r["id"] for r in rows if r.get("viral_status") == "ready"][:limit]
+            if pending:
+                sb.table("clips").update({"viral_status": "approved"}).in_("id", pending).execute()
+                for r in rows:
+                    if r["id"] in pending:
+                        r["viral_status"] = "approved"
+        nets = [f"facebook:{p}" for p in page_ids]
+        have = {}
+        for p in sb.table("posts").select("clip_id,network").in_("network", nets).in_("clip_id", [r["id"] for r in rows]).execute().data or []:
+            have.setdefault(p["clip_id"], set()).add(p["network"])
+        return [r for r in rows if set(nets) - have.get(r["id"], set()) == set(nets)][:limit]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def autopilot_taken(page_ids):
+    """Fechas ya ocupadas, por red con prefijo facebook:<id> (para no pegar todos los posts a la vez)."""
+    out = {}
+    if not page_ids:
+        return out
+    try:
+        nets = [f"facebook:{p}" for p in page_ids]
+        for p in sb.table("posts").select("network,scheduled_at").in_("network", nets).eq("status", "queued").execute().data or []:
+            out.setdefault(p["network"], []).append(p["scheduled_at"])
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def autopilot_pending(page_ids):
+    out = {}
+    if not page_ids:
+        return out
+    try:
+        nets = [f"facebook:{p}" for p in page_ids]
+        for p in sb.table("posts").select("network").in_("network", nets).eq("status", "queued").execute().data or []:
+            out[p["network"]] = out.get(p["network"], 0) + 1
+    except Exception:  # noqa: BLE001
+        pass
+    return out
