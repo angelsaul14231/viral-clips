@@ -46,7 +46,7 @@ def client():
             endpoint_url=endpoint,
             aws_access_key_id=_env("R2_ACCESS_KEY_ID"),
             aws_secret_access_key=_env("R2_SECRET_ACCESS_KEY"),
-            region_name="auto",
+            region_name=_env("R2_REGION", "auto"),
         )
     return _client
 

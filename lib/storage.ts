@@ -18,7 +18,7 @@ async function s3() {
     if (!endpoint) throw new Error("Falta R2_ACCOUNT_ID o R2_ENDPOINT en el entorno");
     cached = new S3Client({
       endpoint,
-      region: "auto",
+      region: process.env.R2_REGION || "auto",
       credentials: {
         accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
         secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",

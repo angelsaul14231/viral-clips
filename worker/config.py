@@ -19,6 +19,7 @@ R2_ACCESS_KEY_ID = os.environ.get("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY = os.environ.get("R2_SECRET_ACCESS_KEY", "")
 R2_CLIPS_BUCKET = os.environ.get("R2_CLIPS_BUCKET", "clips")
 R2_ENDPOINT = os.environ.get("R2_ENDPOINT", "")
+R2_REGION = os.environ.get("R2_REGION", "auto")  # Tigris usa 'auto'; Backblaze B2 usa su región (ej. us-west-004)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
